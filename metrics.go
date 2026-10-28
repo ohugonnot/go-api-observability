@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -58,41 +58,60 @@ func metricsHandler(reg *prometheus.Registry) http.Handler {
 	return mux
 }
 
+// slowThreshold must match the "slow" latency policy (threshold_ms: 500) in
+// otel-collector/config.yaml: such traces are always kept by the Collector.
+const slowThreshold = 500 * time.Millisecond
+
 // instrument records RED metrics and one access log line per request.
 // It must receive the same *http.Request as the mux: the mux sets r.Pattern on it.
 func instrument(next http.Handler, m *httpMetrics, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		defer func() {
+			// A panicking handler is still a request: count it as a 500.
+			p := recover()
+			if p == http.ErrAbortHandler {
+				panic(p) // deliberate abort: let net/http handle it
+			}
+			if p != nil {
+				log.ErrorContext(r.Context(), "panic recovered", "panic", fmt.Sprint(p))
+				if !rec.wrote {
+					http.Error(rec, "internal server error", http.StatusInternalServerError)
+				}
+				rec.status = http.StatusInternalServerError
+			}
+			record(r, rec.status, time.Since(start), m, log)
+		}()
 		next.ServeHTTP(rec, r)
-		elapsed := time.Since(start)
-
-		// Label with the route pattern ("/invoices/{id}"), never r.URL.Path ("/invoices/42"):
-		// one series per route instead of one per invoice.
-		route, method := routeLabel(r), methodLabel(r.Method)
-		m.requests.WithLabelValues(method, route, strconv.Itoa(rec.status)).Inc()
-		observe(m.duration.WithLabelValues(method, route), elapsed.Seconds(), r.Context())
-
-		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("http.route", route))
-		level := slog.LevelInfo
-		if rec.status >= 500 {
-			level = slog.LevelError
-		}
-		log.Log(r.Context(), level, "http request",
-			"method", method, "route", route, "status", rec.status,
-			"duration_ms", float64(elapsed.Microseconds())/1000)
 	})
 }
 
-// observe attaches the trace ID as an exemplar, so a latency bucket in
-// Grafana links to one concrete trace. Unsampled spans have nothing to link to.
-func observe(o prometheus.Observer, seconds float64, ctx context.Context) {
-	sc := trace.SpanContextFromContext(ctx)
-	if eo, ok := o.(prometheus.ExemplarObserver); ok && sc.IsSampled() {
-		eo.ObserveWithExemplar(seconds, prometheus.Labels{"trace_id": sc.TraceID().String()})
-		return
+func record(r *http.Request, status int, elapsed time.Duration, m *httpMetrics, log *slog.Logger) {
+	// Label with the route pattern ("/invoices/{id}"), never r.URL.Path ("/invoices/42"):
+	// one series per route instead of one per invoice.
+	route, method := routeLabel(r), methodLabel(r.Method)
+	m.requests.WithLabelValues(method, route, strconv.Itoa(status)).Inc()
+
+	obs := m.duration.WithLabelValues(method, route)
+	sc := trace.SpanContextFromContext(r.Context())
+	// Exemplar only for requests the Collector always keeps (5xx or slow):
+	// a fast 200 would mostly link to a trace dropped by tail sampling.
+	if eo, ok := obs.(prometheus.ExemplarObserver); ok && sc.IsSampled() &&
+		(status >= 500 || elapsed >= slowThreshold) {
+		eo.ObserveWithExemplar(elapsed.Seconds(), prometheus.Labels{"trace_id": sc.TraceID().String()})
+	} else {
+		obs.Observe(elapsed.Seconds())
 	}
-	o.Observe(seconds)
+
+	trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("http.route", route))
+	level := slog.LevelInfo
+	if status >= 500 {
+		level = slog.LevelError
+	}
+	log.Log(r.Context(), level, "http request",
+		"method", method, "route", route, "status", status,
+		"duration_ms", float64(elapsed.Microseconds())/1000)
 }
 
 func routeLabel(r *http.Request) string {
@@ -118,11 +137,20 @@ func methodLabel(m string) string {
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	wrote  bool
 }
 
+// WriteHeader keeps the first final status (1xx are informational).
 func (r *statusRecorder) WriteHeader(code int) {
-	r.status = code
+	if !r.wrote && code >= 200 {
+		r.status, r.wrote = code, true
+	}
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.wrote = true
+	return r.ResponseWriter.Write(b)
 }
 
 // Unwrap lets http.ResponseController reach the underlying writer.

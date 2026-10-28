@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,13 +24,41 @@ type testApp struct {
 
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
+	return newTestAppWith(t, true)
+}
+
+// newTestAppWith uses the production TracerProvider (sampler, span limits)
+// with a span recorder instead of the OTLP exporter.
+func newTestAppWith(t *testing.T, faults bool) *testApp {
+	t.Helper()
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	spans := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
-	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+	tp, err := newTracerProvider(t.Context(), 1, sdktrace.WithSpanProcessor(spans))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	app := &testApp{spans: spans, reg: prometheus.NewRegistry(), logs: &bytes.Buffer{}}
-	app.handler = newHandler(newLogger(app.logs), tp, app.reg, true)
+	app.handler = newHandler(newLogger(app.logs), tp, app.reg, faults)
 	return app
+}
+
+// logLines decodes the JSON log lines.
+func (a *testApp) logLines(t *testing.T) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(a.logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("log line is not JSON: %s", line)
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (a *testApp) do(method, target, body string, header ...string) *httptest.ResponseRecorder {

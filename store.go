@@ -41,14 +41,13 @@ type Store struct {
 
 // NewStore returns a store seeded with one invoice (ID "1") for the demo.
 func NewStore(tp trace.TracerProvider) *Store {
-	s := &Store{
-		tracer:   tp.Tracer("github.com/ohugonnot/go-api-observability/store"),
-		invoices: map[string]Invoice{},
+	return &Store{
+		tracer: tp.Tracer("github.com/ohugonnot/go-api-observability/store"),
+		invoices: map[string]Invoice{"1": {
+			ID: "1", Customer: "ACME", Email: "billing@acme.example", AmountCents: 12000, Currency: "EUR",
+		}},
+		lastID: 1,
 	}
-	s.Create(context.Background(), Invoice{
-		Customer: "ACME", Email: "billing@acme.example", AmountCents: 12000, Currency: "EUR",
-	})
-	return s
 }
 
 // Get opens a child span of the request span carried by ctx.

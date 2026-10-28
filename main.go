@@ -16,6 +16,32 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
+type config struct {
+	Addr        string  // public API
+	MetricsAddr string  // internal /metrics, loopback unless overridden
+	SampleRatio float64 // head sampling ratio for root spans
+	DemoFaults  bool    // ?delay= and ?fail=, demo only
+}
+
+func loadConfig(getenv func(string) string) (config, error) {
+	ratio, err := sampleRatio(getenv("TRACE_SAMPLE_RATIO"))
+	if err != nil {
+		return config{}, err
+	}
+	or := func(key, fallback string) string {
+		if v := getenv(key); v != "" {
+			return v
+		}
+		return fallback
+	}
+	return config{
+		Addr:        or("ADDR", ":8080"),
+		MetricsAddr: or("METRICS_ADDR", "127.0.0.1:9091"),
+		SampleRatio: ratio,
+		DemoFaults:  getenv("DEMO_FAULTS") == "1",
+	}, nil
+}
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
@@ -30,11 +56,11 @@ func run() error {
 	log := newLogger(os.Stdout)
 	slog.SetDefault(log)
 
-	ratio, err := sampleRatio(os.Getenv("TRACE_SAMPLE_RATIO"))
+	cfg, err := loadConfig(os.Getenv)
 	if err != nil {
 		return err
 	}
-	tp, err := newTracerProvider(ctx, ratio)
+	tp, err := newTracerProvider(ctx, cfg.SampleRatio)
 	if err != nil {
 		return err
 	}
@@ -42,19 +68,11 @@ func run() error {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	reg := newRegistry()
-	public := &http.Server{
-		Addr:              envOr("ADDR", ":8080"),
-		Handler:           newHandler(log, tp, reg, os.Getenv("DEMO_FAULTS") == "1"),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	public := newServer(cfg.Addr, newHandler(log, tp, reg, cfg.DemoFaults))
 	// /metrics lives on a separate, internal listener: it is not part of the
 	// public API, it reveals internals, and scraping must not depend on the
 	// public port's routing, auth or rate limits.
-	internal := &http.Server{
-		Addr:              envOr("METRICS_ADDR", "127.0.0.1:9091"),
-		Handler:           metricsHandler(reg),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	internal := newServer(cfg.MetricsAddr, metricsHandler(reg))
 
 	errc := make(chan error, 2)
 	for _, srv := range []*http.Server{public, internal} {
@@ -72,13 +90,36 @@ func run() error {
 	case <-ctx.Done():
 		log.Info("shutting down")
 	}
+	return shutdown(tp, public, internal)
+}
 
-	// Drain HTTP first (in-flight requests still create spans), then flush spans.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// newServer sets the timeouts http.Server lacks by default (slow clients
+// could otherwise hold connections forever).
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second, // above the 5s demo delay cap
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+}
+
+// shutdown drains HTTP first (in-flight requests still create spans), then
+// flushes spans, each with its own budget: 8s + 5s stays below the 20s
+// stop_grace_period of the compose file.
+func shutdown(tp interface{ Shutdown(context.Context) error }, servers ...*http.Server) error {
+	srvCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	return errors.Join(
-		public.Shutdown(shutdownCtx),
-		internal.Shutdown(shutdownCtx),
-		tp.Shutdown(shutdownCtx),
-	)
+	var errs []error
+	for _, srv := range servers {
+		errs = append(errs, srv.Shutdown(srvCtx))
+	}
+
+	tpCtx, cancelTP := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelTP()
+	errs = append(errs, tp.Shutdown(tpCtx))
+	return errors.Join(errs...)
 }

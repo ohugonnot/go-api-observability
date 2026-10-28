@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -14,21 +15,30 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// newTracerProvider samples with ParentBased(TraceIDRatioBased(ratio)):
-// root spans keep `ratio` of traces, child spans follow the caller's decision
-// (the sampled flag of the incoming traceparent).
-func newTracerProvider(ctx context.Context, ratio float64) (*sdktrace.TracerProvider, error) {
+// newSampler: root spans keep `ratio` of traces, child spans follow the
+// caller's decision (the sampled flag of the incoming traceparent).
+func newSampler(ratio float64) sdktrace.Sampler {
+	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
+}
+
+// newTracerProvider exports over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+// Extra options let tests plug in-memory processors.
+func newTracerProvider(ctx context.Context, ratio float64, extra ...sdktrace.TracerProviderOption) (*sdktrace.TracerProvider, error) {
 	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
 		attribute.String("service.name", envOr("OTEL_SERVICE_NAME", "invoice-api")),
 	))
 	if err != nil {
 		return nil, err
 	}
+	// Attribute values come partly from clients (url.path, user agent...): cap them.
+	limits := sdktrace.NewSpanLimits()
+	limits.AttributeValueLengthLimit = 256
+
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))),
+		sdktrace.WithSampler(newSampler(ratio)),
+		sdktrace.WithRawSpanLimits(limits),
 	}
-
 	// Without a Collector, spans are still created (trace_id in logs) but not exported.
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
 		exp, err := otlptracehttp.New(ctx) // reads the OTEL_EXPORTER_OTLP_* variables
@@ -37,7 +47,7 @@ func newTracerProvider(ctx context.Context, ratio float64) (*sdktrace.TracerProv
 		}
 		opts = append(opts, sdktrace.WithBatcher(exp))
 	}
-	return sdktrace.NewTracerProvider(opts...), nil
+	return sdktrace.NewTracerProvider(append(opts, extra...)...), nil
 }
 
 // sampleRatio parses TRACE_SAMPLE_RATIO; empty means 1 (keep everything).
@@ -46,7 +56,7 @@ func sampleRatio(s string) (float64, error) {
 		return 1, nil
 	}
 	r, err := strconv.ParseFloat(s, 64)
-	if err != nil || r < 0 || r > 1 {
+	if err != nil || math.IsNaN(r) || r < 0 || r > 1 {
 		return 0, fmt.Errorf("TRACE_SAMPLE_RATIO must be a number between 0 and 1, got %q", s)
 	}
 	return r, nil

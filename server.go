@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -44,8 +47,20 @@ func newHandler(log *slog.Logger, tp trace.TracerProvider, reg prometheus.Regist
 	)
 }
 
+// Validation keeps raw client input out of spans, logs and memory.
+var (
+	validID       = regexp.MustCompile(`^[0-9]{1,18}$`)
+	validCurrency = regexp.MustCompile(`^[A-Z]{3}$`)
+)
+
+const maxTextLen = 256
+
 func (s *server) getInvoice(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !validID.MatchString(id) {
+		http.Error(w, "invoice not found", http.StatusNotFound) // nothing raw logged
+		return
+	}
 	inv, err := s.store.Get(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
 		s.log.InfoContext(r.Context(), "invoice not found", "invoice_id", id)
@@ -59,14 +74,24 @@ func (s *server) createInvoice(w http.ResponseWriter, r *http.Request) {
 	var in Invoice
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
+	err := dec.Decode(&in)
+	if err == nil && dec.Decode(&struct{}{}) != io.EOF {
+		err = errors.New("data after the JSON object")
+	}
+	if err != nil {
+		if errors.As(err, new(*http.MaxBytesError)) {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		// Log the error class, never the request body.
 		s.log.WarnContext(r.Context(), "invalid invoice payload", "error", "json decode failed")
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	if in.Customer == "" || in.AmountCents <= 0 || len(in.Currency) != 3 {
-		http.Error(w, "customer, amount_cents > 0 and a 3-letter currency are required", http.StatusUnprocessableEntity)
+	if strings.TrimSpace(in.Customer) == "" || len(in.Customer) > maxTextLen || len(in.Email) > maxTextLen ||
+		in.AmountCents <= 0 || !validCurrency.MatchString(in.Currency) {
+		http.Error(w, "customer (max 256 bytes), amount_cents > 0 and an ISO currency like EUR are required",
+			http.StatusUnprocessableEntity)
 		return
 	}
 

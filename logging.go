@@ -11,6 +11,7 @@ import (
 
 // traceHandler adds trace_id and span_id to every record logged with a
 // context that carries a span (use the *Context logging methods).
+// The trace_id comes from the incoming traceparent: clients choose it.
 type traceHandler struct{ slog.Handler }
 
 func (h traceHandler) Handle(ctx context.Context, r slog.Record) error {
@@ -31,15 +32,21 @@ func (h traceHandler) WithGroup(name string) slog.Handler {
 	return traceHandler{h.Handler.WithGroup(name)}
 }
 
-// sensitiveKeys is a safety net: values under these keys are masked even if
-// someone logs them by mistake. The first line of defence is not logging them.
-var sensitiveKeys = map[string]bool{
-	"authorization": true, "cookie": true, "email": true, "password": true, "token": true,
+// sensitiveKeyParts is a safety net: an attribute whose key contains one of
+// these (any case) is masked, e.g. "user_email" or "X-Api-Key".
+// It only sees attribute keys: a secret inside a map, a struct without
+// LogValue, or an error message goes through. The real defence is not
+// logging such values, and LogValue on business types (see Invoice).
+var sensitiveKeyParts = []string{
+	"email", "passw", "token", "secret", "cookie", "authorization", "api_key", "apikey", "api-key",
 }
 
 func redact(_ []string, a slog.Attr) slog.Attr {
-	if sensitiveKeys[strings.ToLower(a.Key)] {
-		return slog.String(a.Key, "[REDACTED]")
+	key := strings.ToLower(a.Key)
+	for _, part := range sensitiveKeyParts {
+		if strings.Contains(key, part) {
+			return slog.String(a.Key, "[REDACTED]")
+		}
 	}
 	return a
 }

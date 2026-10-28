@@ -1,33 +1,121 @@
-# promtool test rules prometheus/rules/slo_test.yml
+# promtool test rules slo_test.yml
+# SLO 99.9%: error budget 0.1%. Fast burn = 14.4x (1.44% errors), slow = 6x (0.6%).
+# Series are cumulative counters sampled every minute, 600 or 1000 requests/min.
 rule_files:
   - slo.yml
 
 evaluation_interval: 1m
 
 tests:
-  # 10 requests/s, 2% of them fail: 20x the 0.1% budget, above 14.4.
-  - interval: 1m
+  # 2% errors (20x the budget) for 70 minutes: pending first, then a page.
+  - name: sustained fast burn pages after the 2m "for"
+    interval: 1m
     input_series:
-      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="200"}'
-        values: '0+588x90'
-      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="500"}'
-        values: '0+12x90'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+588x70'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
+        values: '0+12x70'
     alert_rule_test:
+      - eval_time: 2m # condition true, still pending
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: { severity: page, job: invoice-api }
+            exp_annotations:
+              summary: "Invoice API burns its 30-day error budget 14.4x too fast (2% in 1h)"
       - eval_time: 70m
         alertname: InvoiceAPIErrorBudgetFastBurn
         exp_alerts:
-          - exp_labels:
-              severity: page
-              job: invoice-api
+          - exp_labels: { severity: page, job: invoice-api }
             exp_annotations:
               summary: "Invoice API burns its 30-day error budget 14.4x too fast (2% in 1h)"
 
-  # 0.5% errors: 5x the budget, below both thresholds: no alert.
-  - interval: 1m
+  # Quiet for 5h, then 2% errors for 70 minutes: the 1h window sees it, a 6h one would not.
+  - name: fresh incident after a quiet period pages
+    interval: 1m
     input_series:
-      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="200"}'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+600x300 180588+588x69'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
+        values: '0+0x300 12+12x69'
+    alert_rule_test:
+      - eval_time: 370m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: { severity: page, job: invoice-api }
+            exp_annotations:
+              summary: "Invoice API burns its 30-day error budget 14.4x too fast (2% in 1h)"
+
+  # 2% for an hour, then back to 0.5% for 10 minutes: the 1h window is still
+  # high, the 5m window shows it is over, so no page.
+  - name: finished spike does not page
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+588x60 35877+597x9'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
+        values: '0+12x60 723+3x9'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts: []
+
+  # 5% errors for the last 5 minutes only: the 5m window is high, the 1h
+  # window shows it is not significant yet, so no page.
+  - name: very recent errors alone do not page
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+600x65 39570+570x4'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
+        values: '0+0x65 30+30x4'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts: []
+
+  # 0.8% errors: 8x the budget, above the slow threshold (6x), below the fast one.
+  - name: slow burn opens a ticket after its 15m "for"
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+992x60'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
+        values: '0+8x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: InvoiceAPIErrorBudgetSlowBurn
+        exp_alerts:
+          - exp_labels: { severity: ticket, job: invoice-api }
+            exp_annotations:
+              summary: "Invoice API burns its 30-day error budget 6x too fast (5% in 6h)"
+      - eval_time: 30m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts: []
+
+  # 0.8% for 380 minutes, then 40 minutes clean: the 6h window is still above
+  # 0.6%, the 30m window is clean, so no ticket.
+  - name: finished slow burn does not open a ticket
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+992x380 377960+1000x39'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
+        values: '0+8x380 3040+0x39'
+    alert_rule_test:
+      - eval_time: 420m
+        alertname: InvoiceAPIErrorBudgetSlowBurn
+        exp_alerts: []
+
+  # 0.5% errors: 5x the budget, below both thresholds: no alert.
+  - name: errors within budget pace do not alert
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
         values: '0+597x400'
-      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="500"}'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
         values: '0+3x400'
     alert_rule_test:
       - eval_time: 390m

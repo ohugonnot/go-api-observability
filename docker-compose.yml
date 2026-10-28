@@ -2,13 +2,14 @@
 # Prometheus scrapes the app's internal port and the Collector, Grafana shows both.
 #
 # Hardening choices (several books and tutorials do the opposite):
-# - no container runs as root (explicit `user:`; all four images are non-root anyway);
+# - no container runs as root (explicit `user:`; all images are non-root anyway);
 # - no password in this file: Grafana's comes from .env (see .env.example),
 #   where tutorials often hard-code GF_SECURITY_ADMIN_PASSWORD=admin;
 # - admin UIs are published on 127.0.0.1 only, not 0.0.0.0;
 # - Prometheus runs without --web.enable-lifecycle (often added to allow
 #   POST /-/reload and /-/quit, which nobody should reach without auth);
-# - the app's /metrics port (9091) is not published at all.
+# - the app's /metrics port (9091) is not published at all;
+# - read-only root filesystems, writes only to named volumes or tmpfs.
 
 x-hardening: &hardening
   cap_drop: [ALL]
@@ -18,20 +19,39 @@ x-hardening: &hardening
 services:
   app:
     <<: *hardening
-    build: .
-    image: invoice-api:dev
+    build:
+      context: .
+      target: app
     user: "65532:65532"
     read_only: true
+    stop_grace_period: 20s # shutdown budget: 8s HTTP drain + 5s span flush
     environment:
       ADDR: ":8080"
       METRICS_ADDR: ":9091" # internal: Prometheus reaches it over the compose network
       OTEL_SERVICE_NAME: invoice-api
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      TRACE_SAMPLE_RATIO: "1" # keep every trace at the source: the Collector decides
-      DEMO_FAULTS: "1" # enables ?delay= and ?fail= for the demo
+      # Keep every trace at the source: the Collector decides. A ratio < 1
+      # here would drop errors before tail sampling could keep them.
+      TRACE_SAMPLE_RATIO: "1"
+      DEMO_FAULTS: ${DEMO_FAULTS:-1} # enables ?delay= and ?fail=; set 0 outside the demo
     ports:
       - "127.0.0.1:8080:8080"
-    depends_on: [otel-collector]
+    depends_on:
+      otel-collector:
+        condition: service_started # scratch image: no shell for a healthcheck
+
+  # Traffic generator: docker compose --profile tools run --rm loadgen
+  loadgen:
+    build:
+      context: .
+      target: loadgen
+    profiles: [tools]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["-url", "http://app:8080", "-n", "1000"]
+    depends_on: [app]
 
   otel-collector:
     <<: *hardening
@@ -41,12 +61,22 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
-    depends_on: [jaeger]
+    depends_on:
+      jaeger:
+        condition: service_healthy
 
   jaeger:
     <<: *hardening
-    image: jaegertracing/jaeger:2.20.0 # see README: 2.21+ removed the v1 HTTP API used by Grafana
+    # 2.21+ removed the v1 HTTP API that Grafana's Jaeger datasource calls (see README).
+    image: jaegertracing/jaeger:2.20.0 # Jaeger v2, all-in-one, in-memory storage
     user: "10001"
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:13133/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     ports:
       - "127.0.0.1:16686:16686" # UI and query API
 
@@ -54,6 +84,7 @@ services:
     <<: *hardening
     image: prom/prometheus:v3.15.1
     user: "65534:65534" # nobody
+    read_only: true
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -61,6 +92,11 @@ services:
     volumes:
       - ./prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     ports:
       - "127.0.0.1:9090:9090"
 
@@ -68,6 +104,8 @@ services:
     <<: *hardening
     image: grafana/grafana:13.2.5
     user: "472"
+    read_only: true
+    tmpfs: [/tmp]
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?copy .env.example to .env and set GRAFANA_ADMIN_PASSWORD}
@@ -79,9 +117,18 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     ports:
       - "127.0.0.1:3000:3000"
-    depends_on: [prometheus, jaeger]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
 
 volumes:
   prometheus-data:
