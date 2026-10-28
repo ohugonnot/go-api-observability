@@ -12,8 +12,8 @@ point at each other:
   repository, the incoming W3C `traceparent` kept as a link (public endpoint), head sampling in the app and
   **tail sampling** in the Collector (errors and slow traces kept, ~10% of the rest).
 
-Companion code for the article *"Observabilité d'une API Go : slog, runtime/metrics,
-Prometheus et OpenTelemetry"* by Odilon Hugonnot ([web-developpeur.com](https://web-developpeur.com)).
+Companion code for the article *"Observabilité d'une API Go : slog, Prometheus et
+OpenTelemetry reliés par un trace_id"* by Odilon Hugonnot ([web-developpeur.com](https://web-developpeur.com)).
 
 It is a teaching example, not a production template.
 
@@ -287,11 +287,11 @@ Run by the author on 2026-10-28 (WSL2, Docker 29.1.3, Compose v2.40.3).
 | load generator verdict | `go test ./cmd/loadgen`: small n, no failing request, missing or extra 5xx, NaN flags |
 | Collector config | `otelcol-contrib validate` in the 0.164.0 image |
 | whole stack | `scripts/e2e.sh` (the `make e2e` target) green twice in a row from a fresh clone, with a PATH without Go, while a dev stack (`docker compose up -d`, default ports) was running from another clone: 1000 requests counted, route labels limited to patterns, >= 80% of 5xx and of slow requests found in Jaeger, 70-90% of traces dropped (observed 79-83%), every exemplar found in Jaeger and in the app logs, alert rules loaded, Grafana datasources healthy, `/metrics` 404 on the public port |
-| the tests catch regressions | 53 Go mutations and 18 rule mutations, each one turned a test red (a local mutation script, not published): for example `r.URL.Path` as label -> `TestRequestCounterUsesRoutePattern`, no `recover` -> `TestPanicIsCountedAs500`, no abort after a partial write -> `TestPanicAfterWriteAbortsConnection`, no public endpoint -> `TestUnsampledTraceparentCannotHideA500`, health probes counted -> `TestHealthzIsNotCounted`, `validID` up to 40 digits -> `TestIDLengthBoundary`, exemplar on every request -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> the pending/firing case of `slo_test.yml`. Removing the Collector's `errors` policy makes the e2e fail ("error traces in Jaeger: 4, want >= 80% of 45") |
+| the tests catch regressions | 54 Go mutations and 18 rule mutations, each one turned a test red (a local mutation script, not published): for example `r.URL.Path` as label -> `TestRequestCounterUsesRoutePattern`, no `recover` -> `TestPanicIsCountedAs500`, no abort after a partial write -> `TestPanicAfterWriteAbortsConnection`, no public endpoint -> `TestUnsampledTraceparentCannotHideA500`, health probes counted -> `TestHealthzIsNotCounted`, `validID` up to 40 digits -> `TestIDLengthBoundary`, exemplar on every request -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> the pending/firing case of `slo_test.yml`. Removing the Collector's `errors` policy makes the e2e fail ("error traces in Jaeger: 4, want >= 80% of 45") |
 | Jaeger 2.22 incompatibility | reproduced, see Design choices |
 
 Not verified: behaviour under real load or with several Collector replicas, the
-GitHub Actions workflow (not run on GitHub yet), the exemplar-to-trace click in
+exemplar-to-trace click in
 the Grafana UI itself (checked through the Grafana and Prometheus APIs), arm64
 hosts, the `make` targets on the author's machine (`make` is not installed
 there: the same commands were run directly, and `make -n` / `make lint test`

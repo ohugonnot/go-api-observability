@@ -13,8 +13,8 @@ trois signaux renvoient les uns aux autres :
   dépôt, `traceparent` W3C entrant gardé comme lien (endpoint public),
   échantillonnage en tête dans l'app et **tail sampling** dans le Collector (erreurs et requêtes lentes gardées, ~10 % du reste).
 
-Code d'accompagnement de l'article « Observabilité d'une API Go : slog, runtime/metrics,
-Prometheus et OpenTelemetry », par Odilon Hugonnot ([web-developpeur.com](https://web-developpeur.com)).
+Code d'accompagnement de l'article « Observabilité d'une API Go : slog, Prometheus et
+OpenTelemetry reliés par un trace_id », par Odilon Hugonnot ([web-developpeur.com](https://web-developpeur.com)).
 
 C'est un exemple pédagogique, pas un modèle de production.
 
@@ -301,11 +301,11 @@ Lancé par l'auteur le 28/10/2026 (WSL2, Docker 29.1.3, Compose v2.40.3).
 | verdict du générateur de charge | `go test ./cmd/loadgen` : petit n, aucune requête en échec, 5xx manquants ou en trop, flags NaN |
 | config du Collector | `otelcol-contrib validate` dans l'image 0.164.0 |
 | pile complète | `scripts/e2e.sh` (la cible `make e2e`) vert deux fois de suite depuis un clone neuf, avec un PATH sans Go, pendant qu'une pile de dev (`docker compose up -d`, ports par défaut) tournait depuis un autre clone : 1000 requêtes comptées, labels de route limités aux motifs, au moins 80 % des 5xx et des requêtes lentes retrouvées dans Jaeger, 70 à 90 % des traces abandonnées (observé : 79-83 %), chaque exemplar retrouvé dans Jaeger et dans les logs de l'app, règles d'alerte chargées, datasources Grafana en bonne santé, `/metrics` en 404 sur le port public |
-| les tests attrapent les régressions | 53 mutations Go et 18 mutations de règles, chacune a fait rougir un test (script de mutation local, non publié) : par exemple `r.URL.Path` en label -> `TestRequestCounterUsesRoutePattern`, pas de `recover` -> `TestPanicIsCountedAs500`, pas d'abandon après une écriture partielle -> `TestPanicAfterWriteAbortsConnection`, pas d'endpoint public -> `TestUnsampledTraceparentCannotHideA500`, sondes de santé comptées -> `TestHealthzIsNotCounted`, `validID` jusqu'à 40 chiffres -> `TestIDLengthBoundary`, exemplar sur toutes les requêtes -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> le cas pending/firing de `slo_test.yml`. Retirer la politique `errors` du Collector fait échouer l'e2e (« error traces in Jaeger: 4, want >= 80% of 45 ») |
+| les tests attrapent les régressions | 54 mutations Go et 18 mutations de règles, chacune a fait rougir un test (script de mutation local, non publié) : par exemple `r.URL.Path` en label -> `TestRequestCounterUsesRoutePattern`, pas de `recover` -> `TestPanicIsCountedAs500`, pas d'abandon après une écriture partielle -> `TestPanicAfterWriteAbortsConnection`, pas d'endpoint public -> `TestUnsampledTraceparentCannotHideA500`, sondes de santé comptées -> `TestHealthzIsNotCounted`, `validID` jusqu'à 40 chiffres -> `TestIDLengthBoundary`, exemplar sur toutes les requêtes -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> le cas pending/firing de `slo_test.yml`. Retirer la politique `errors` du Collector fait échouer l'e2e (« error traces in Jaeger: 4, want >= 80% of 45 ») |
 | incompatibilité Jaeger 2.22 | reproduite, voir Choix |
 
 Non vérifié : la tenue en charge réelle ou avec plusieurs réplicas du Collector,
-le workflow GitHub Actions (pas encore lancé sur GitHub), le clic exemplar → trace
+le clic exemplar → trace
 dans l'interface Grafana elle-même (vérifié par les API de Grafana et de
 Prometheus), les hôtes arm64, les cibles `make` sur la machine de l'auteur
 (`make` n'y est pas installé : les mêmes commandes ont été lancées directement,
