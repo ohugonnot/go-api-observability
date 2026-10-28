@@ -1,0 +1,18 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # An exemplar's trace_id label becomes a link to the trace in Jaeger.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: jaeger
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686

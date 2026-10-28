@@ -1,0 +1,61 @@
+# OpenTelemetry Collector (contrib distribution: tail_sampling is not in core).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  # The decision is taken once the whole trace is known (after decision_wait),
+  # so it can depend on the outcome: errors and slow traces are always kept.
+  # A trace is kept as soon as one policy says "sample".
+  tail_sampling:
+    decision_wait: 5s # short for the demo; the default is 30s
+    num_traces: 50000
+    policies:
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow
+        type: latency
+        latency:
+          threshold_ms: 500
+      - name: ten-percent-of-the-rest
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true # plain gRPC inside the compose network only
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      # Internal metrics (otelcol_processor_tail_sampling_*), scraped by Prometheus.
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling]
+      exporters: [otlp_grpc/jaeger]

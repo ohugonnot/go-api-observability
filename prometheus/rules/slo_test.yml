@@ -1,0 +1,38 @@
+# promtool test rules prometheus/rules/slo_test.yml
+rule_files:
+  - slo.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 10 requests/s, 2% of them fail: 20x the 0.1% budget, above 14.4.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="200"}'
+        values: '0+588x90'
+      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="500"}'
+        values: '0+12x90'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: invoice-api
+            exp_annotations:
+              summary: "Invoice API burns its 30-day error budget 14.4x too fast (2% in 1h)"
+
+  # 0.5% errors: 5x the budget, below both thresholds: no alert.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="200"}'
+        values: '0+597x400'
+      - series: 'http_requests_total{job="invoice-api",method="GET",route="/invoices/{id}",code="500"}'
+        values: '0+3x400'
+    alert_rule_test:
+      - eval_time: 390m
+        alertname: InvoiceAPIErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 390m
+        alertname: InvoiceAPIErrorBudgetSlowBurn
+        exp_alerts: []

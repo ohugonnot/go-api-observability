@@ -1,0 +1,88 @@
+# Local observability lab: app -> OpenTelemetry Collector (tail sampling) -> Jaeger,
+# Prometheus scrapes the app's internal port and the Collector, Grafana shows both.
+#
+# Hardening choices (several books and tutorials do the opposite):
+# - no container runs as root (explicit `user:`; all four images are non-root anyway);
+# - no password in this file: Grafana's comes from .env (see .env.example),
+#   where tutorials often hard-code GF_SECURITY_ADMIN_PASSWORD=admin;
+# - admin UIs are published on 127.0.0.1 only, not 0.0.0.0;
+# - Prometheus runs without --web.enable-lifecycle (often added to allow
+#   POST /-/reload and /-/quit, which nobody should reach without auth);
+# - the app's /metrics port (9091) is not published at all.
+
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  app:
+    <<: *hardening
+    build: .
+    image: invoice-api:dev
+    user: "65532:65532"
+    read_only: true
+    environment:
+      ADDR: ":8080"
+      METRICS_ADDR: ":9091" # internal: Prometheus reaches it over the compose network
+      OTEL_SERVICE_NAME: invoice-api
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      TRACE_SAMPLE_RATIO: "1" # keep every trace at the source: the Collector decides
+      DEMO_FAULTS: "1" # enables ?delay= and ?fail= for the demo
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on: [otel-collector]
+
+  otel-collector:
+    <<: *hardening
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    user: "10001:10001"
+    read_only: true
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on: [jaeger]
+
+  jaeger:
+    <<: *hardening
+    image: jaegertracing/jaeger:2.20.0 # see README: 2.21+ removed the v1 HTTP API used by Grafana
+    user: "10001"
+    ports:
+      - "127.0.0.1:16686:16686" # UI and query API
+
+  prometheus:
+    <<: *hardening
+    image: prom/prometheus:v3.15.1
+    user: "65534:65534" # nobody
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    <<: *hardening
+    image: grafana/grafana:13.2.5
+    user: "472"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?copy .env.example to .env and set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true" # no plugin downloads at startup
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/invoice-api-red.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on: [prometheus, jaeger]
+
+volumes:
+  prometheus-data:
+  grafana-data:

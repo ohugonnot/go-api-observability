@@ -1,0 +1,9 @@
+.git
+.github
+.env
+*_test.go
+cmd
+grafana
+prometheus
+otel-collector
+scripts
