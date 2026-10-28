@@ -90,7 +90,7 @@ services:
   jaeger:
     <<: *hardening
     # 2.21+ removed the v1 HTTP API that Grafana's Jaeger datasource calls (see README).
-    image: jaegertracing/jaeger:2.20.0 # Jaeger v2, all-in-one, in-memory storage
+    image: jaegertracing/jaeger:2.22.0 # Jaeger v2, all-in-one, in-memory storage
     user: "10001"
     read_only: true
     tmpfs: [/tmp]
