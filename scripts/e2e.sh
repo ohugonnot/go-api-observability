@@ -105,20 +105,6 @@ while read -r route; do
 done <<<"$routes"
 pass "only route patterns in the route label"
 
-step "traces kept by tail sampling (decision_wait is 5s)"
-jaeger_count() {
-  curl -fsS --get "$JAEGER/api/traces" --data-urlencode service=invoice-api \
-    --data-urlencode lookback=1h --data-urlencode limit=5000 "$@" | jq '.data | length'
-}
-errors=$(int "$(promq 'sum(http_requests_total{job="invoice-api",code=~"5.."})')")
-((errors > 0)) || fail "no 5xx counted by Prometheus"
-enough_errors() { (($(jaeger_count --data-urlencode 'tags={"error":"true"}') * 10 >= errors * 8)); }
-retry 60 enough_errors || fail "error traces in Jaeger: $(jaeger_count --data-urlencode 'tags={"error":"true"}'), want >= 80% of $errors"
-pass "error traces in Jaeger: $(jaeger_count --data-urlencode 'tags={"error":"true"}') for $errors 5xx"
-enough_slow() { (($(jaeger_count --data-urlencode minDuration=500ms) * 10 >= sent_slow * 8)); }
-retry 60 enough_slow || fail "slow traces in Jaeger: $(jaeger_count --data-urlencode minDuration=500ms), want >= 80% of $sent_slow"
-pass "slow traces (>= 500ms) in Jaeger: $(jaeger_count --data-urlencode minDuration=500ms) for $sent_slow sent"
-
 step "collector dropped most of the normal traces"
 m='otelcol_processor_tail_sampling_global_count_traces_sampled'
 all_q="sum({__name__=~\"${m}(_total)?\"})"
@@ -130,6 +116,22 @@ pass "decided=$REQUESTS kept=$kept dropped=$dropped"
 # Expected: errors + slow (~10%) kept, 10% of the other ~90% kept => ~81% dropped.
 awk -v d="$dropped" -v k="$kept" 'BEGIN { r = d / (d + k); printf "   dropped share: %.0f%%\n", r * 100; exit !(r >= 0.70 && r <= 0.90) }' \
   || fail "dropped share outside 70-90%"
+
+# Counted only once the Collector has decided on every trace (step above):
+# counting earlier only measures how far the 5s decision_wait has got.
+step "every error and every slow trace is kept"
+jaeger_count() {
+  curl -fsS --get "$JAEGER/api/traces" --data-urlencode service=invoice-api \
+    --data-urlencode lookback=1h --data-urlencode limit=5000 "$@" | jq '.data | length'
+}
+errors=$(int "$(promq 'sum(http_requests_total{job="invoice-api",code=~"5.."})')")
+((errors > 0)) || fail "no 5xx counted by Prometheus"
+enough_errors() { (($(jaeger_count --data-urlencode 'tags={"error":"true"}') >= errors)); }
+retry 30 enough_errors || fail "error traces in Jaeger: $(jaeger_count --data-urlencode 'tags={"error":"true"}'), want $errors"
+pass "error traces in Jaeger: $(jaeger_count --data-urlencode 'tags={"error":"true"}') for $errors 5xx"
+enough_slow() { (($(jaeger_count --data-urlencode minDuration=500ms) >= sent_slow)); }
+retry 30 enough_slow || fail "slow traces in Jaeger: $(jaeger_count --data-urlencode minDuration=500ms), want $sent_slow"
+pass "slow traces (>= 500ms) in Jaeger: $(jaeger_count --data-urlencode minDuration=500ms) for $sent_slow sent"
 
 step "exemplars: every one leads to a stored trace and a log line"
 exemplar_ids() {
