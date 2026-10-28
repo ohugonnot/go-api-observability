@@ -9,7 +9,7 @@ point at each other:
 - **metrics** (Prometheus, RED method + Go runtime): slow and failed requests carry
   their `trace_id` as an **exemplar**, so a point on a Grafana latency graph opens the trace;
 - **traces** (OpenTelemetry): server span from `otelhttp`, child span in the
-  repository, W3C `traceparent` propagation, head sampling in the app and
+  repository, the incoming W3C `traceparent` kept as a link (public endpoint), head sampling in the app and
   **tail sampling** in the Collector (errors and slow traces kept, ~10% of the rest).
 
 Companion code for the article *"Observabilité d'une API Go : slog, runtime/metrics,
@@ -175,11 +175,14 @@ trusted front end is split in two here, joined by the link.
 
 **Personal data.** The defence is not logging it: `Invoice.LogValue` only logs
 id, amount and currency, the bad-payload log does not echo the body, invalid
-IDs are rejected before reaching logs or spans. A `ReplaceAttr` safety net masks
-an attribute whose key (any case) is, or ends with `_`, `-` or `.` followed by,
-one of `email`, `password`, `passwd`, `token`, `secret`, `cookie`, `set-cookie`,
-`authorization`, `api_key`, `apikey`, `api-key`: `user_email`, `X-Api-Key`,
-`db.password` are masked, `token_count` or `email_verified` are not. Its
+IDs are rejected before reaching logs or spans. A `ReplaceAttr` safety net lower-cases
+each attribute key and strips `_`, `-` and `.`, then masks it when it equals,
+or ends with, one of `email`, `password`, `passwd`, `token`, `secret`,
+`secretkey`, `privatekey`, `accesskey`, `cookie`, `authorization`, `apikey`:
+`user_email`, `accessToken`, `X-Api-Key`, `userpassword`, `db.password` are
+masked, `token_count`, `max_tokens` or `email_verified` are not. Plurals
+(`emails`, `cookies`) and other names (`credentials`, `session_id`) are not
+covered. Its
 limits: it only sees attribute keys, so a secret inside a map, in a struct
 without `LogValue` or in an error message still goes through.
 

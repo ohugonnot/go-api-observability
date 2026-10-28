@@ -10,8 +10,8 @@ trois signaux renvoient les uns aux autres :
   erreur portent leur `trace_id` en **exemplar**, si bien qu'un point du graphe de
   latence dans Grafana ouvre la trace ;
 - **traces** (OpenTelemetry) : span serveur par `otelhttp`, span enfant dans le
-  dépôt, propagation W3C `traceparent`, échantillonnage en tête dans l'app et
-  **tail sampling** dans le Collector (erreurs et requêtes lentes gardées, ~10 % du reste).
+  dépôt, `traceparent` W3C entrant gardé comme lien (endpoint public),
+  échantillonnage en tête dans l'app et **tail sampling** dans le Collector (erreurs et requêtes lentes gardées, ~10 % du reste).
 
 Code d'accompagnement de l'article « Observabilité d'une API Go : slog, runtime/metrics,
 Prometheus et OpenTelemetry », par Odilon Hugonnot ([web-developpeur.com](https://web-developpeur.com)).
@@ -182,11 +182,14 @@ trace démarrée par un front de confiance est coupée en deux ici, reliée par 
 **Données personnelles.** La défense, c'est de ne pas les logger :
 `Invoice.LogValue` ne logge que l'id, le montant et la devise, le log d'un corps
 invalide ne recopie pas le corps, les identifiants invalides sont rejetés avant
-d'atteindre logs et spans. Un filet `ReplaceAttr` masque un attribut dont la clé
-(quelle que soit la casse) vaut, ou se termine par `_`, `-` ou `.` suivi de,
-l'un des mots `email`, `password`, `passwd`, `token`, `secret`, `cookie`,
-`set-cookie`, `authorization`, `api_key`, `apikey`, `api-key` : `user_email`,
-`X-Api-Key`, `db.password` sont masqués, `token_count` ou `email_verified` non.
+d'atteindre logs et spans. Un filet `ReplaceAttr` met chaque clé
+d'attribut en minuscules et retire `_`, `-` et `.`, puis la masque si elle vaut
+l'un des mots `email`, `password`, `passwd`, `token`, `secret`, `secretkey`,
+`privatekey`, `accesskey`, `cookie`, `authorization`, `apikey`, ou se termine
+par l'un d'eux : `user_email`, `accessToken`, `X-Api-Key`, `userpassword`,
+`db.password` sont masqués, `token_count`, `max_tokens` ou `email_verified`
+non. Les pluriels (`emails`, `cookies`) et d'autres noms (`credentials`,
+`session_id`) ne sont pas couverts.
 Ses limites : il ne voit
 que les clés d'attributs, donc un secret dans une map, dans une struct sans
 `LogValue` ou dans un message d'erreur passe quand même.

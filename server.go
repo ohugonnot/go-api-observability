@@ -40,7 +40,7 @@ func newHandler(log *slog.Logger, tp trace.TracerProvider, reg prometheus.Regist
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Health probes bypass observability: no span, no metric, no log line.
 		// Counting them would dilute the error rate (the SLI) with free successes.
-		if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/healthz" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

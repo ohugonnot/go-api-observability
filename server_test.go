@@ -16,6 +16,7 @@ func TestStatusCodes(t *testing.T) {
 		want                       int
 	}{
 		{"health", "GET", "/healthz", "", http.StatusOK},
+		{"health HEAD", "HEAD", "/healthz", "", http.StatusOK},
 		{"found", "GET", "/invoices/1", "", http.StatusOK},
 		{"missing", "GET", "/invoices/999", "", http.StatusNotFound},
 		{"non numeric id", "GET", "/invoices/abc", "", http.StatusNotFound},

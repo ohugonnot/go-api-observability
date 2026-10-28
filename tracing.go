@@ -15,8 +15,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// newSampler: root spans keep `ratio` of traces, child spans follow the
-// caller's decision (the sampled flag of the incoming traceparent).
+// newSampler: root spans keep `ratio` of traces; a child span follows its
+// parent's decision. On the public port every request starts a new root
+// (WithPublicEndpointFn in server.go), so the client's sampled flag never
+// decides; the parent-based part applies to spans created inside the app.
 func newSampler(ratio float64) sdktrace.Sampler {
 	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 }

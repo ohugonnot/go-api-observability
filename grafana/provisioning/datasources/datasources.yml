@@ -7,6 +7,8 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     jsonData:
+      # Matches the 5s scrape interval, so $__rate_interval can go down to 20s.
+      timeInterval: 5s
       # An exemplar's trace_id label becomes a link to the trace in Jaeger.
       exemplarTraceIdDestinations:
         - name: trace_id
