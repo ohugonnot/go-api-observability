@@ -18,6 +18,8 @@ updates:
       interval: weekly
     ignore:
       # Jaeger 2.21+ removed the v1 HTTP API used by Grafana's Jaeger
-      # datasource: see "Design choices" in the README.
+      # datasource: see "Design choices" in the README. A version range
+      # was not honoured here (2.22.0 was still proposed and failed e2e),
+      # so only 2.20.x patch updates are allowed.
       - dependency-name: jaegertracing/jaeger
-        versions: [">= 2.21"]
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
