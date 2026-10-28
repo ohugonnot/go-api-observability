@@ -12,24 +12,41 @@
 #   0.05 * 720 / 6 = 6, checked on 6h and 30m.
 # Sources: "SLIs and SLOs Demystified", lesson 68; Google SRE Workbook,
 # chapter "Alerting on SLOs".
+#
+# Without any 5xx series the numerator would be empty and the ratio "no data";
+# "or <denominator> * 0" turns it into a real 0.
+# /healthz is not in http_requests_total (the app skips it), so health probes
+# do not dilute the error ratio.
 groups:
   - name: invoice-api-slo-ratios
     rules:
       - record: job:slo_errors_per_request:ratio_rate5m
         expr: |
-          sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[5m]))
+          (
+            sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[5m]))
+            or sum by (job) (rate(http_requests_total{job="invoice-api"}[5m])) * 0
+          )
           / sum by (job) (rate(http_requests_total{job="invoice-api"}[5m]))
       - record: job:slo_errors_per_request:ratio_rate30m
         expr: |
-          sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[30m]))
+          (
+            sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[30m]))
+            or sum by (job) (rate(http_requests_total{job="invoice-api"}[30m])) * 0
+          )
           / sum by (job) (rate(http_requests_total{job="invoice-api"}[30m]))
       - record: job:slo_errors_per_request:ratio_rate1h
         expr: |
-          sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[1h]))
+          (
+            sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[1h]))
+            or sum by (job) (rate(http_requests_total{job="invoice-api"}[1h])) * 0
+          )
           / sum by (job) (rate(http_requests_total{job="invoice-api"}[1h]))
       - record: job:slo_errors_per_request:ratio_rate6h
         expr: |
-          sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[6h]))
+          (
+            sum by (job) (rate(http_requests_total{job="invoice-api",code=~"5.."}[6h]))
+            or sum by (job) (rate(http_requests_total{job="invoice-api"}[6h])) * 0
+          )
           / sum by (job) (rate(http_requests_total{job="invoice-api"}[6h]))
 
   - name: invoice-api-slo-alerts

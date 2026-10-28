@@ -37,6 +37,7 @@ services:
       # here would drop errors before tail sampling could keep them.
       TRACE_SAMPLE_RATIO: "1"
       DEMO_FAULTS: ${DEMO_FAULTS:-1} # enables ?delay= and ?fail=; set 0 outside the demo
+      GOMEMLIMIT: 115MiB # ~90% of mem_limit: the GC works harder before the cgroup OOM-kills
     mem_limit: 128m
     pids_limit: 100
     healthcheck: # distroless: no shell or curl, the binary probes itself
@@ -64,7 +65,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 64m
     pids_limit: 50
-    command: ["-url", "http://app:8080", "-n", "1000"]
+    # The target is in the entrypoint, so "run --rm loadgen -n 3000" only
+    # replaces the defaults below and keeps -url.
+    entrypoint: ["/loadgen", "-url", "http://app:8080"]
+    command: ["-n", "1000"]
     depends_on:
       app:
         condition: service_healthy
@@ -129,7 +133,7 @@ services:
     read_only: true
     tmpfs: [/tmp]
     mem_limit: 512m
-    pids_limit: 200
+    pids_limit: 400 # 158 pids measured on a 16-core host
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?copy .env.example to .env and set GRAFANA_ADMIN_PASSWORD}

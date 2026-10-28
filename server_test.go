@@ -101,6 +101,17 @@ func TestHealthcheck(t *testing.T) {
 		t.Error("stopped server reported healthy")
 	}
 
+	// Listen addresses on every interface: Go dials the local system for them
+	// (the test server listens on 127.0.0.1 only).
+	again := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer again.Close()
+	_, port, _ = net.SplitHostPort(again.Listener.Addr().String())
+	for _, addr := range []string{"0.0.0.0:" + port, "[::]:" + port} {
+		if err := healthcheck(addr); err != nil {
+			t.Errorf("healthcheck(%q): %v", addr, err)
+		}
+	}
+
 	sick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))

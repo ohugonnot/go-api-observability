@@ -12,7 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -29,9 +30,12 @@ func newHTTPMetrics(reg prometheus.Registerer) *httpMetrics {
 			Help: "HTTP requests by method, route pattern and status code.",
 		}, []string{"method", "route", "code"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "HTTP request duration by method and route pattern.",
-			Buckets: prometheus.DefBuckets,
+			Name: "http_request_duration_seconds",
+			Help: "HTTP request duration by method and route pattern.",
+			// 12 buckets from 0.5ms to 5s: DefBuckets start at 5ms, too coarse for
+			// a fast API. histogram_quantile interpolates linearly inside a bucket,
+			// so a quantile is only as precise as the buckets around it.
+			Buckets: prometheus.ExponentialBucketsRange(0.0005, 5, 12),
 		}, []string{"method", "route"}),
 	}
 	reg.MustRegister(m.requests, m.duration)
@@ -80,7 +84,12 @@ func instrument(next http.Handler, m *httpMetrics, log *slog.Logger) http.Handle
 				// connection quietly. Not counted as a 500.
 				panic(p)
 			}
-			// A panicking handler is still a request: count and log it as a 500.
+			// A panicking handler is still a request: count and log it as a 500,
+			// and mark the span as failed (otelhttp cannot: the panic skips it),
+			// so the Collector keeps the trace the exemplar points to.
+			span := trace.SpanFromContext(r.Context())
+			span.RecordError(fmt.Errorf("panic: %v", p))
+			span.SetStatus(codes.Error, "panic")
 			rec.status = http.StatusInternalServerError
 			record(r, rec.status, time.Since(start), m, log)
 			log.ErrorContext(r.Context(), "panic recovered",
@@ -113,7 +122,9 @@ func record(r *http.Request, status int, elapsed time.Duration, m *httpMetrics, 
 		obs.Observe(elapsed.Seconds())
 	}
 
-	trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("http.route", route))
+	if r.Pattern != "" { // no http.route on unrouted requests ("unmatched" is a metric label only)
+		trace.SpanFromContext(r.Context()).SetAttributes(semconv.HTTPRoute(route))
+	}
 	level := slog.LevelInfo
 	if status >= 500 {
 		level = slog.LevelError

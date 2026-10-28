@@ -88,10 +88,11 @@ tests:
       - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
         values: '0+8x60'
     alert_rule_test:
-      - eval_time: 10m # condition true, still pending
+      # The condition holds from 1m: pending until 15m later.
+      - eval_time: 14m
         alertname: InvoiceAPIErrorBudgetSlowBurn
         exp_alerts: []
-      - eval_time: 17m # just past the 15m "for"
+      - eval_time: 16m
         alertname: InvoiceAPIErrorBudgetSlowBurn
         exp_alerts:
           - exp_labels: { severity: ticket, job: invoice-api }
@@ -136,3 +137,21 @@ tests:
       - eval_time: 390m
         alertname: InvoiceAPIErrorBudgetSlowBurn
         exp_alerts: []
+
+  # Only successes: the ratio is 0, not "no data" (no 5xx series exists).
+  - name: no errors at all gives a ratio of 0
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
+        values: '0+600x30'
+    promql_expr_test:
+      - expr: job:slo_errors_per_request:ratio_rate5m
+        eval_time: 20m
+        exp_samples:
+          - labels: 'job:slo_errors_per_request:ratio_rate5m{job="invoice-api"}'
+            value: 0
+      - expr: job:slo_errors_per_request:ratio_rate1h
+        eval_time: 20m
+        exp_samples:
+          - labels: 'job:slo_errors_per_request:ratio_rate1h{job="invoice-api"}'
+            value: 0

@@ -17,6 +17,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type config struct {
@@ -78,8 +79,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	setupOTel(log, tp)
 
 	reg := newRegistry()
 	public := newServer(cfg.Addr, newHandler(log, tp, reg, cfg.DemoFaults))
@@ -107,13 +107,24 @@ func run() error {
 	return shutdown(tp, public, internal)
 }
 
+// setupOTel installs the global provider and propagator, and routes the SDK's
+// own errors (failed exports...) to our JSON log at ERROR level instead of
+// the default plain-text stderr line.
+func setupOTel(log *slog.Logger, tp trace.TracerProvider) {
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		log.Error("opentelemetry", "error", err)
+	}))
+}
+
 // healthcheck GETs /healthz on the loopback side of a listen address like ":8080".
 func healthcheck(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
+	if host == "" { // ":8080"; Go already dials 0.0.0.0 and [::] on the local system
 		host = "127.0.0.1"
 	}
 	client := &http.Client{Timeout: 2 * time.Second}

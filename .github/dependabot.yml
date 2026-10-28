@@ -8,3 +8,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: docker # Dockerfile base images
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Jaeger 2.21+ removed the v1 HTTP API used by Grafana's Jaeger
+      # datasource: see "Design choices" in the README.
+      - dependency-name: jaegertracing/jaeger
+        versions: [">= 2.21"]

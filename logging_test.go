@@ -62,8 +62,10 @@ func TestInvoiceLogValue(t *testing.T) {
 
 func TestRedactSafetyNet(t *testing.T) {
 	masked := []string{
-		"email", "user_email", "Authorization", "api_key", "x-api-key", "X-Api-Key",
-		"Set-Cookie", "cookie", "secret", "client_secret", "db.password", "db_passwd", "session_token",
+		"email", "user_email", "e-mail", "Authorization", "api_key", "x-api-key", "X-Api-Key", "xApiKey",
+		"Set-Cookie", "cookie", "secret", "client_secret", "secret_key", "private_key",
+		"db.password", "db_passwd", "userpassword", "session_token",
+		"accessToken", "refreshToken", "sessionToken",
 	}
 	kept := []string{"token_count", "max_tokens", "email_verified", "email_count", "secretary", "customer"}
 	for _, key := range masked {

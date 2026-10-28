@@ -20,7 +20,7 @@ It is a teaching example, not a production template.
 ## Prerequisites
 
 - **The stack** (`make up`, `make demo`, `make e2e`): Docker Engine with Compose v2
-  (`docker compose version`), `curl` and `jq`. Go is not needed: the API and the
+  (`docker compose version`); `curl` and `jq` are only needed by `make e2e`. Go is not needed: the API and the
   load generator are built in containers.
 - **Local development** (`make run`, `make test`, `make lint`, `make vuln`): Go 1.26
   (the `toolchain` line of `go.mod` asks for go1.26.10).
@@ -95,7 +95,8 @@ Host ports, all bound to 127.0.0.1:
 | Prometheus | 9090, `PROMETHEUS_PORT`          | 19090, `E2E_PROMETHEUS_PORT` |
 
 The app's metrics port (9091) and the Collector are never published. The e2e
-test uses its own compose project and ports, so it can run while a dev stack is up.
+test uses its own compose project and ports, so it can run while a dev stack is
+up; run only one e2e at a time.
 
 | URL                         | What                                        |
 |-----------------------------|---------------------------------------------|
@@ -151,9 +152,26 @@ API, it reveals internals (Go version, memory, routes), and scraping must not go
 through the public port's auth, rate limiting or load balancer.
 
 **Logs.** `traceHandler` wraps the JSON handler and adds `trace_id`/`span_id`
-from the context (use `InfoContext` and friends). The `trace_id` comes from the
-incoming `traceparent` header when there is one: **clients choose it**, so do
-not treat it as trusted or unique. 5xx access logs are at `ERROR` level.
+from the context (use `InfoContext` and friends). 5xx access logs are at
+`ERROR` level. Like any attribute added by a handler, `trace_id` lands inside
+the current group of a logger built with `WithGroup`; the request logger here
+is never grouped, so it stays at the top level where log tools look for it.
+Errors of the OpenTelemetry SDK itself (a failed export...) go to the same JSON
+log at `ERROR` level (`otel.SetErrorHandler`).
+
+**Health probes are invisible.** `GET /healthz` is answered before any
+instrumentation: no span, no metric, no access log. Counted, the compose
+healthcheck alone (every 5 s) would add free successes to the error ratio's
+denominator and hide real errors, plus 17,000 log lines a day.
+
+**Public endpoint vs. internal propagation.** On this public port an incoming
+`traceparent` is untrusted: with `otelhttp.WithPublicEndpointFn`, every request
+starts a new trace, sampled by our own policy, and only *links* to the
+caller's context. Without it, a client could pick our `trace_id`, or send the
+"not sampled" flag (`-00`) to make even its 500s disappear from traces and
+exemplars. Between trusted internal services you want the opposite: plain
+propagation, one trace across services. The trade-off: a trace started by a
+trusted front end is split in two here, joined by the link.
 
 **Personal data.** The defence is not logging it: `Invoice.LogValue` only logs
 id, amount and currency, the bad-payload log does not echo the body, invalid
@@ -176,8 +194,9 @@ idle and header timeouts plus a 16 KiB header limit.
 exposes `runtime/metrics` series (GC, heap, scheduler latencies).
 
 **Sampling.** The app samples at the head with
-`ParentBased(TraceIDRatioBased(TRACE_SAMPLE_RATIO))` (default 1): a request
-arriving with a sampled `traceparent` stays sampled. In compose the ratio is 1
+`ParentBased(TraceIDRatioBased(TRACE_SAMPLE_RATIO))` (default 1). On this public
+endpoint every request is a root, so the ratio decides; `ParentBased` matters
+for child spans and for internal services that do trust their callers. In compose the ratio is 1
 and the Collector decides at the tail, once the whole trace is known
 (`decision_wait: 5s` for the demo): `status_code: ERROR` and `latency > 500ms`
 are always kept, `probabilistic: 10` keeps a share of the rest. Do not combine a
@@ -195,10 +214,11 @@ Grafana Prometheus datasource maps `trace_id` to the Jaeger datasource.
 **Error budget alerts.** `prometheus/rules/slo.yml`: SLO 99.9% over 30 days,
 multi-window multi-burn-rate. Page at 14.4x (2% of the budget in 1h, checked on
 1h and 5m), ticket at 6x (5% in 6h, on 6h and 30m). Only 5xx count: a 404 is
-the client's error. `slo_test.yml` holds seven `promtool test rules` cases:
+the client's error. `slo_test.yml` holds eight `promtool test rules` cases:
 sustained burn (pending, then firing), fresh incident, finished spike with
 steady 404s, very recent errors only, slow burn (pending, then firing),
-finished slow burn, errors within budget.
+finished slow burn, errors within budget, no error at all (ratio 0, not
+"no data": the rules use `(errors or total * 0) / total`).
 
 ### Logs to Loki (not included)
 
@@ -237,8 +257,8 @@ or a logging driver plugin, i.e. more privileges than the rest of the stack.
   Tempo is the long-term fix.
 - **Hardening, where many tutorials do otherwise:** no container runs as root,
   `cap_drop: ALL`, `no-new-privileges`, read-only root filesystems, memory and
-process limits, healthchecks (the app probes itself with `-healthcheck`: its
-distroless image has no shell), the
+  process limits (with `GOMEMLIMIT` at ~90% of the app's), healthchecks (the
+  app probes itself with `-healthcheck`: its distroless image has no shell), the
   Grafana password comes from `.env` (never `admin/admin` in the compose file),
   admin UIs bind to `127.0.0.1`, Prometheus runs without
   `--web.enable-lifecycle`, the Go images are distroless `nonroot`.
@@ -259,12 +279,12 @@ Run by the author on 2026-10-28 (WSL2, Docker 29.1.3, Compose v2.40.3).
 |------|-----------------|
 | formatting, vet, static analysis | `gofmt -l .`, `go vet ./...`, `staticcheck ./...` (v0.8.2): clean |
 | unit tests, race detector | `go test -race ./...` in `golang:1.26.10-bookworm`: green |
-| known vulnerabilities | `govulncheck ./...` (v1.9.0): none (x/net v0.59.0 had GO-2026-6617, fixed by v0.62.0) |
-| alert rules | `promtool check rules`, `promtool test rules` (7 cases), `promtool check config`, in `prom/prometheus:v3.15.1` |
+| known vulnerabilities | `govulncheck ./...` (v1.9.0): none |
+| alert rules | `promtool check rules`, `promtool test rules` (8 cases), `promtool check config`, in `prom/prometheus:v3.15.1` |
 | load generator verdict | `go test ./cmd/loadgen`: small n, no failing request, missing or extra 5xx, NaN flags |
 | Collector config | `otelcol-contrib validate` in the 0.164.0 image |
-| whole stack | `scripts/e2e.sh` (the `make e2e` target) green twice in a row from a fresh clone, with a PATH without Go, while a dev stack (`docker compose up -d`, default ports) was running from another clone: 1000 requests counted, route labels limited to patterns, >= 80% of 5xx and of slow requests found in Jaeger, 70-90% of traces dropped (observed 81-83%), every exemplar found in Jaeger and in the app logs, alert rules loaded, Grafana datasources healthy, `/metrics` 404 on the public port |
-| the tests catch regressions | 42 Go mutations and 14 rule mutations, each one turned a test red (`mutate.py`): for example `r.URL.Path` as label -> `TestRequestCounterUsesRoutePattern`, no `recover` -> `TestPanicIsCountedAs500`, no abort after a partial write -> `TestPanicAfterWriteAbortsConnection`, `validID` up to 40 digits -> `TestIDLengthBoundary`, exemplar on every request -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> the pending/firing case of `slo_test.yml`. Removing the Collector's `errors` policy makes the e2e fail ("error traces in Jaeger: 4, want >= 80% of 45") |
+| whole stack | `scripts/e2e.sh` (the `make e2e` target) green twice in a row from a fresh clone, with a PATH without Go, while a dev stack (`docker compose up -d`, default ports) was running from another clone: 1000 requests counted, route labels limited to patterns, >= 80% of 5xx and of slow requests found in Jaeger, 70-90% of traces dropped (observed 79-83%), every exemplar found in Jaeger and in the app logs, alert rules loaded, Grafana datasources healthy, `/metrics` 404 on the public port |
+| the tests catch regressions | 53 Go mutations and 18 rule mutations, each one turned a test red (a local mutation script, not published): for example `r.URL.Path` as label -> `TestRequestCounterUsesRoutePattern`, no `recover` -> `TestPanicIsCountedAs500`, no abort after a partial write -> `TestPanicAfterWriteAbortsConnection`, no public endpoint -> `TestUnsampledTraceparentCannotHideA500`, health probes counted -> `TestHealthzIsNotCounted`, `validID` up to 40 digits -> `TestIDLengthBoundary`, exemplar on every request -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> the pending/firing case of `slo_test.yml`. Removing the Collector's `errors` policy makes the e2e fail ("error traces in Jaeger: 4, want >= 80% of 45") |
 | Jaeger 2.22 incompatibility | reproduced, see Design choices |
 
 Not verified: behaviour under real load or with several Collector replicas, the
@@ -276,7 +296,8 @@ inside the Go image).
 
 ## Limits
 
-- Teaching example: in-memory store, no auth, no TLS between components,
+- Teaching example: in-memory store (unbounded: every POST stays in memory
+  until restart), no auth, no TLS between components,
   in-memory Jaeger, demo-sized intervals (5s scrape, 5s `decision_wait`).
 - `DEMO_FAULTS` must be `0` outside the demo (`DEMO_FAULTS=0 make up`).
 - A log `trace_id` of a fast, successful request may point to a trace the

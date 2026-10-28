@@ -22,6 +22,7 @@ REQUESTS=${REQUESTS:-1000}
 # The 80% and 70-90% thresholds below are only statistically safe from here.
 ((REQUESTS >= 500)) || fail "REQUESTS=$REQUESTS: use at least 500 (the sampling checks are statistical)"
 
+# One e2e run at a time: concurrent runs would share this project.
 # Its own project AND its own host ports: a dev stack started with `make up`
 # (default ports, project "go-api-observability") keeps running untouched.
 export COMPOSE_PROJECT_NAME=invoice-api-e2e
@@ -83,22 +84,22 @@ curl -fsS "$PROM/api/v1/rules" | jq -e '[.data.groups[].rules[].name] | index("I
 pass "SLO alert rules loaded"
 
 step "load: $REQUESTS requests (5% errors, 5% slow)"
-out=$(docker compose --profile tools run --rm -T --build --quiet-pull loadgen -url http://app:8080 -n "$REQUESTS") \
+out=$(docker compose --profile tools run --rm -T --build --quiet-pull loadgen -n "$REQUESTS") \
   || { echo "$out"; fail "loadgen failed"; }
 echo "$out"
 sent_slow=$(sed -n 's/.*slow=\([0-9]*\).*/\1/p' <<<"$out")
 [[ -n "$sent_slow" ]] || fail "cannot read the slow count from loadgen"
 
 step "metrics: every request counted, route pattern labels only"
-counted_q='sum(http_requests_total{job="invoice-api",route!="/healthz"})'
+counted_q='sum(http_requests_total{job="invoice-api"})' # /healthz is never counted
 counted_is_all() { [[ "$(int "$(promq "$counted_q")")" == "$REQUESTS" ]]; }
 retry 60 counted_is_all || fail "Prometheus counted $(promq "$counted_q") requests, want $REQUESTS"
-pass "http_requests_total (without /healthz) = $REQUESTS"
+pass "http_requests_total = $REQUESTS (health probes not counted)"
 routes=$(curl -fsS --get "$PROM/api/v1/label/route/values" --data-urlencode 'match[]=http_requests_total' | jq -r '.data[]')
 pass "route values: $(tr '\n' ' ' <<<"$routes")"
 while read -r route; do
   case "$route" in
-    /healthz | /invoices | "/invoices/{id}" | unmatched) ;;
+    /invoices | "/invoices/{id}" | unmatched) ;; # /healthz must not appear
     *) fail "unexpected route label '$route' (raw path or ID?)" ;;
   esac
 done <<<"$routes"

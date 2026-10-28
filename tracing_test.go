@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestServerSpanHasRouteAndStoreChild(t *testing.T) {
@@ -33,17 +36,67 @@ func TestServerSpanHasRouteAndStoreChild(t *testing.T) {
 	}
 }
 
-func TestIncomingTraceparentIsContinued(t *testing.T) {
+const clientTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+// Public endpoint: the caller's traceparent becomes a link, not the parent.
+func TestIncomingTraceparentBecomesALink(t *testing.T) {
 	app := newTestApp(t)
-	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
-	app.do("GET", "/invoices/1", "", "traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+	app.do("GET", "/invoices/1", "", "traceparent", "00-"+clientTraceID+"-00f067aa0ba902b7-01")
 
 	server := app.span(t, "GET /invoices/{id}")
-	if got := server.SpanContext().TraceID().String(); got != traceID {
-		t.Errorf("trace ID = %s, want the caller's %s", got, traceID)
+	if got := server.SpanContext().TraceID().String(); got == clientTraceID {
+		t.Error("server span continued the client's trace; want a new root")
 	}
-	if !server.Parent().IsRemote() {
-		t.Error("server span parent should be the remote caller")
+	if server.Parent().IsValid() {
+		t.Errorf("server span has parent %v, want a root span", server.Parent())
+	}
+	links := server.Links()
+	if len(links) != 1 || links[0].SpanContext.TraceID().String() != clientTraceID {
+		t.Errorf("links = %v, want one link to the client's trace %s", links, clientTraceID)
+	}
+}
+
+// A client sending "not sampled" (-00) cannot hide a failing request.
+func TestUnsampledTraceparentCannotHideA500(t *testing.T) {
+	app := newTestApp(t)
+	rec := app.do("GET", "/invoices/1?fail=1", "", "traceparent", "00-"+clientTraceID+"-00f067aa0ba902b7-00")
+	if rec.Code != 500 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	server := app.span(t, "GET /invoices/{id}")
+	if !server.SpanContext().IsSampled() {
+		t.Error("server span not sampled: the client opted the 500 out of tracing")
+	}
+	if ids := exemplarTraceIDs(t, app.reg); len(ids) != 1 || ids[0] != server.SpanContext().TraceID().String() {
+		t.Errorf("exemplars = %v, want the server span's trace", ids)
+	}
+}
+
+func TestUnmatchedRequestHasNoRouteAttribute(t *testing.T) {
+	app := newTestApp(t)
+	app.do("GET", "/nope", "")
+	for _, s := range app.spans.Ended() {
+		for _, a := range s.Attributes() {
+			if a.Key == "http.route" {
+				t.Errorf("span %q has http.route=%q on an unrouted request", s.Name(), a.Value.AsString())
+			}
+		}
+	}
+}
+
+// SDK errors (failed exports...) reach our JSON log at ERROR level.
+func TestOTelErrorsAreLogged(t *testing.T) {
+	prevTP, prevProp, prevEH := otel.GetTracerProvider(), otel.GetTextMapPropagator(), otel.GetErrorHandler()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+		otel.SetErrorHandler(prevEH)
+	})
+	var buf strings.Builder
+	setupOTel(newLogger(&buf), noop.NewTracerProvider())
+	otel.Handle(errors.New("export failed"))
+	if !strings.Contains(buf.String(), `"level":"ERROR","msg":"opentelemetry","error":"export failed"`) {
+		t.Errorf("OTel error not logged as JSON ERROR: %q", buf.String())
 	}
 }
 

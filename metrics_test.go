@@ -9,6 +9,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Three different invoice IDs must produce one series per route and status,
@@ -68,6 +71,73 @@ http_requests_total{code="500",method="GET",route="/boom"} 1
 	}
 	if n := testutil.CollectAndCount(reg, "http_request_duration_seconds"); n != 1 {
 		t.Errorf("duration series = %d, want 1", n)
+	}
+}
+
+// Health probes are not requests of the SLI: no series at all.
+func TestHealthzIsNotCounted(t *testing.T) {
+	app := newTestApp(t)
+	for range 3 {
+		if code := app.do("GET", "/healthz", "").Code; code != http.StatusOK {
+			t.Fatalf("/healthz status = %d", code)
+		}
+	}
+	if n := testutil.CollectAndCount(app.reg, "http_requests_total"); n != 0 {
+		t.Errorf("/healthz produced %d http_requests_total series, want 0", n)
+	}
+	if app.logs.Len() != 0 {
+		t.Errorf("/healthz logged: %s", app.logs.String())
+	}
+}
+
+// A panic after a partial write: the span is marked failed (otelhttp cannot,
+// the panic skips its status code), so the Collector keeps the trace that
+// the exemplar points to.
+func TestPanicAfterWriteMarksSpanError(t *testing.T) {
+	app := newTestApp(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	tp, err := newTracerProvider(t.Context(), 1, sdktrace.WithSpanProcessor(app.spans))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /half", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic("boom")
+	})
+	reg := prometheus.NewRegistry()
+	h := observe(mux, newLogger(app.logs), tp, newHTTPMetrics(reg))
+	if p := serveRecovering(h, httptest.NewRecorder(), httptest.NewRequest("GET", "/half", nil)); p != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", p)
+	}
+
+	var server sdktrace.ReadOnlySpan
+	for _, s := range app.spans.Ended() {
+		if s.SpanKind() == trace.SpanKindServer {
+			server = s
+		}
+	}
+	if server == nil {
+		t.Fatal("no server span")
+	}
+	if server.Status().Code != codes.Error {
+		t.Errorf("server span status = %v, want Error", server.Status().Code)
+	}
+	// The SDK records the panic that crosses span.End, but that one is
+	// http.ErrAbortHandler: only our RecordError keeps the original value.
+	var recorded bool
+	for _, e := range server.Events() {
+		for _, a := range e.Attributes {
+			if e.Name == "exception" && a.Key == "exception.message" && strings.Contains(a.Value.AsString(), "boom") {
+				recorded = true
+			}
+		}
+	}
+	if !recorded {
+		t.Errorf("original panic value not recorded on the span: %v", server.Events())
+	}
+	if ids := exemplarTraceIDs(t, reg); len(ids) != 1 || ids[0] != server.SpanContext().TraceID().String() {
+		t.Errorf("exemplars = %v, want the failed span's trace", ids)
 	}
 }
 

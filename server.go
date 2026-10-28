@@ -20,8 +20,7 @@ type server struct {
 	log   *slog.Logger
 }
 
-// newHandler wires routes and observability:
-// otelhttp (server span) -> instrument (metrics, access log) -> mux -> handler.
+// newHandler wires routes and observability.
 // faults enables the ?delay= and ?fail= demo parameters (see demo.go).
 func newHandler(log *slog.Logger, tp trace.TracerProvider, reg prometheus.Registerer, faults bool) http.Handler {
 	s := &server{store: NewStore(tp), log: log}
@@ -36,14 +35,30 @@ func newHandler(log *slog.Logger, tp trace.TracerProvider, reg prometheus.Regist
 	}
 	handle("GET /invoices/{id}", s.getInvoice)
 	handle("POST /invoices", s.createInvoice)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
 
-	return otelhttp.NewHandler(instrument(mux, newHTTPMetrics(reg), log), "http.server",
+	observed := observe(mux, log, tp, newHTTPMetrics(reg))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health probes bypass observability: no span, no metric, no log line.
+		// Counting them would dilute the error rate (the SLI) with free successes.
+		if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		observed.ServeHTTP(w, r)
+	})
+}
+
+// observe chains otelhttp (server span) -> instrument (metrics, access log) -> mux.
+func observe(mux http.Handler, log *slog.Logger, tp trace.TracerProvider, m *httpMetrics) http.Handler {
+	// The operation name is not used by otelhttp's default span name formatter:
+	// spans are named "GET" at start, then "GET /invoices/{id}" once routed.
+	return otelhttp.NewHandler(instrument(mux, m, log), "http.server",
 		otelhttp.WithTracerProvider(tp),
 		otelhttp.WithPropagators(propagation.TraceContext{}), // W3C traceparent
-		otelhttp.WithFilter(func(r *http.Request) bool { return r.URL.Path != "/healthz" }),
+		// Public port: an incoming traceparent is untrusted. Each request starts
+		// a new trace (sampled by our own policy) and only links to the caller's.
+		// (WithPublicEndpoint is gone from otelhttp v0.72; this is its equivalent.)
+		otelhttp.WithPublicEndpointFn(func(*http.Request) bool { return true }),
 	)
 }
 

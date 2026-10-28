@@ -102,13 +102,23 @@ func verdict(byStatus map[int]int, sent map[string]int, transportErrs int) error
 			errs5xx += c
 		}
 	}
+	var total int
+	for _, c := range sent {
+		total += c
+	}
 	failing := sent["failing"]
 	if failing == 0 {
+		// Nothing asked to fail: a healthy API answers (almost) no 5xx.
+		if allowed := max(2, total/100); errs5xx > allowed {
+			return fmt.Errorf("%d 5xx while no failing request was sent (allowed %d)", errs5xx, allowed)
+		}
 		return nil
 	}
 	if errs5xx < failing {
 		return fmt.Errorf("%d 5xx for %d failing requests sent: is DEMO_FAULTS=1 set?", errs5xx, failing)
 	}
+	// Tolerance for unexpected 5xx on top of the requested ones: 10% of
+	// them, at least 2, so that a single stray error does not fail a small run.
 	if extra := errs5xx - failing; extra > max(2, failing/10) {
 		return fmt.Errorf("%d unexpected 5xx beyond the %d failing requests sent", extra, failing)
 	}
