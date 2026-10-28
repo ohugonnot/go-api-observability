@@ -92,6 +92,23 @@ pass "error traces in Jaeger: $(jaeger_count --data-urlencode 'tags={"error":"tr
 retry 30 has_traces --data-urlencode minDuration=500ms || fail "no slow trace in Jaeger"
 pass "slow traces (>= 500ms) in Jaeger: $(jaeger_count --data-urlencode minDuration=500ms)"
 
+step "an exemplar leads to a trace stored in Jaeger"
+exemplar_in_jaeger() {
+  local id
+  for id in $(curl -fsS --get "$PROM/api/v1/query_exemplars" \
+    --data-urlencode 'query=http_request_duration_seconds_bucket{job="invoice-api"}' \
+    --data-urlencode "start=$(($(date +%s) - 900))" --data-urlencode "end=$(date +%s)" |
+    jq -r '.data[].exemplars[].labels.trace_id // empty'); do
+    if curl -fsS "$JAEGER/api/traces/$id" >/dev/null 2>&1; then
+      echo "$id"
+      return 0
+    fi
+  done
+  return 1
+}
+retry 30 exemplar_in_jaeger || fail "no exemplar trace_id found in Jaeger"
+pass "exemplar trace_id=$(exemplar_in_jaeger) is in Jaeger"
+
 step "collector dropped part of the normal traces"
 m='otelcol_processor_tail_sampling_global_count_traces_sampled'
 dropped_q="sum({__name__=~\"${m}(_total)?\",sampled=\"false\"})"
@@ -111,6 +128,10 @@ for uid in prometheus jaeger; do
     || fail "grafana datasource $uid is not healthy"
   pass "datasource $uid healthy"
 done
+curl -fsS -u "admin:$GRAFANA_ADMIN_PASSWORD" "$GRAFANA/api/datasources/uid/prometheus" |
+  jq -e '.jsonData.exemplarTraceIdDestinations[0].datasourceUid == "jaeger"' >/dev/null \
+  || fail "exemplar link from Prometheus to Jaeger not configured"
+pass "exemplar trace_id links to the jaeger datasource"
 curl -fsS -u "admin:$GRAFANA_ADMIN_PASSWORD" "$GRAFANA/api/dashboards/uid/invoice-api-red" | jq -e '.dashboard.title' >/dev/null \
   || fail "RED dashboard not provisioned"
 pass "RED dashboard provisioned"

@@ -156,6 +156,34 @@ prometheus/client_golang v1.25.0. Images : otel/opentelemetry-collector-contrib:
 jaegertracing/jaeger:2.20.0, prom/prometheus:v3.15.1, grafana/grafana:13.2.5,
 golang:1.26.10-alpine3.24, gcr.io/distroless/static-debian13:nonroot (épinglée par digest).
 
+## Vérification
+
+Lancé par l'auteur le 28/10/2026 (WSL2, Docker 29.1.3, Compose v2.40.3), avec
+les versions ci-dessus :
+
+- `go vet`, `gofmt -l`, `go test ./...` et `go test -race ./...` au vert
+  (le passage `-race` dans l'image `golang:1.26.10-bookworm`) ;
+- `promtool check rules`, `promtool test rules` et `promtool check config` via
+  l'image `prom/prometheus:v3.15.1`, et `otelcol-contrib validate` sur la
+  configuration du Collector ;
+- `docker compose up` et `scripts/e2e.sh` (la cible `make e2e`) au vert deux
+  fois de suite, puis `docker compose down -v`. Passage type : 1000 requêtes,
+  ~50 erreurs et ~50 lentes, le Collector a gardé ~180 traces et abandonné
+  ~82 %, traces en erreur et lentes présentes dans Jaeger, un `trace_id`
+  d'exemplar retrouvé dans Jaeger, les deux datasources Grafana en bonne santé.
+
+Tests de mutation : étiqueter avec `r.URL.Path` fait échouer
+`TestRequestCounterUsesRoutePattern` ; retirer le `trace_id` du handler slog fait
+échouer `TestLogsCarryTraceIDAndNoPersonalData` ; passer `r.WithContext(...)` au
+mux fait échouer cinq tests ; monter le seuil de page de 14,4 à 25 fait échouer
+`promtool test rules`.
+
+Non vérifié : la tenue en charge réelle, le workflow GitHub Actions (pas encore
+lancé sur GitHub), le clic exemplar → trace dans l'interface Grafana (vérifié par
+les API seulement), les hôtes arm64, et les cibles `make` sur la machine de
+l'auteur (`make` n'y est pas installé : les mêmes commandes ont été lancées
+directement, et `make -n` / `make lint test` dans l'image Go).
+
 ## Limites
 
 - Exemple pédagogique : dépôt en mémoire, pas d'authentification, pas de TLS

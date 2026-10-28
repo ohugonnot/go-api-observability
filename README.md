@@ -163,6 +163,34 @@ prometheus/client_golang v1.25.0. Images: otel/opentelemetry-collector-contrib:0
 jaegertracing/jaeger:2.20.0, prom/prometheus:v3.15.1, grafana/grafana:13.2.5,
 golang:1.26.10-alpine3.24, gcr.io/distroless/static-debian13:nonroot (pinned by digest).
 
+## Verification
+
+Run by the author on 2026-10-28 (WSL2, Docker 29.1.3, Compose v2.40.3), with the
+versions listed above:
+
+- `go vet`, `gofmt -l`, `go test ./...` and `go test -race ./...` green
+  (the race run inside the `golang:1.26.10-bookworm` image);
+- `promtool check rules`, `promtool test rules` and `promtool check config`
+  through the `prom/prometheus:v3.15.1` image, and
+  `otelcol-contrib validate` on the Collector config;
+- `docker compose up` and `scripts/e2e.sh` (the `make e2e` target) green twice
+  in a row, then `docker compose down -v`. Typical run: 1000 requests,
+  ~50 errors and ~50 slow ones, the Collector kept ~180 traces and dropped
+  ~82%, error and slow traces present in Jaeger, an exemplar `trace_id`
+  resolved in Jaeger, both Grafana datasources healthy.
+
+Mutation checks: labelling with `r.URL.Path` makes
+`TestRequestCounterUsesRoutePattern` fail; dropping `trace_id` from the slog
+handler makes `TestLogsCarryTraceIDAndNoPersonalData` fail; passing
+`r.WithContext(...)` to the mux makes five tests fail; raising the page
+threshold from 14.4 to 25 makes `promtool test rules` fail.
+
+Not verified: behaviour under real load, the GitHub Actions workflow (not run
+on GitHub yet), the exemplar-to-trace click in the Grafana UI (checked through
+the APIs only), arm64 hosts, and the `make` targets on the author's machine
+(`make` is not installed there: the same commands were run directly, and
+`make -n` / `make lint test` inside the Go image).
+
 ## Limits
 
 - Teaching example: in-memory store, no auth, no TLS between components,
