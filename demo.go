@@ -12,6 +12,9 @@ import (
 //	?fail=1       HTTP 500
 //
 // It runs after routing, so r.Pattern and the metric labels stay correct.
+// maxDemoDelay caps ?delay=; the server WriteTimeout must stay above it.
+const maxDemoDelay = 5 * time.Second
+
 func demoFaults(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -19,7 +22,7 @@ func demoFaults(next http.Handler) http.Handler {
 			tracer := spanTracer(r)
 			_, span := tracer.Start(r.Context(), "demo.delay")
 			select {
-			case <-time.After(min(d, 5*time.Second)):
+			case <-time.After(min(d, maxDemoDelay)):
 			case <-r.Context().Done():
 			}
 			span.End()

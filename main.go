@@ -5,7 +5,10 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -43,6 +46,17 @@ func loadConfig(getenv func(string) string) (config, error) {
 }
 
 func main() {
+	// -healthcheck: probe /healthz of a running instance and exit 0 or 1.
+	// The distroless image has no shell or curl for a compose healthcheck.
+	check := flag.Bool("healthcheck", false, "probe the local /healthz and exit")
+	flag.Parse()
+	if *check {
+		if err := healthcheck(envOr("ADDR", ":8080")); err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
@@ -93,6 +107,27 @@ func run() error {
 	return shutdown(tp, public, internal)
 }
 
+// healthcheck GETs /healthz on the loopback side of a listen address like ":8080".
+func healthcheck(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // newServer sets the timeouts http.Server lacks by default (slow clients
 // could otherwise hold connections forever).
 func newServer(addr string, h http.Handler) *http.Server {
@@ -101,7 +136,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 		Handler:           h,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second, // above the 5s demo delay cap
+		WriteTimeout:      30 * time.Second, // above maxDemoDelay
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}

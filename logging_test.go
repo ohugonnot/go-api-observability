@@ -61,17 +61,26 @@ func TestInvoiceLogValue(t *testing.T) {
 }
 
 func TestRedactSafetyNet(t *testing.T) {
+	masked := []string{
+		"email", "user_email", "Authorization", "api_key", "x-api-key", "X-Api-Key",
+		"Set-Cookie", "cookie", "secret", "client_secret", "db.password", "db_passwd", "session_token",
+	}
+	kept := []string{"token_count", "max_tokens", "email_verified", "email_count", "secretary", "customer"}
+	for _, key := range masked {
+		if got := redact(nil, slog.String(key, "v")); got.Value.String() != "[REDACTED]" {
+			t.Errorf("key %q not masked", key)
+		}
+	}
+	for _, key := range kept {
+		if got := redact(nil, slog.String(key, "v")); got.Value.String() != "v" {
+			t.Errorf("key %q masked, it is not sensitive", key)
+		}
+	}
+
+	// Through the logger, including inside a group.
 	var buf strings.Builder
-	newLogger(&buf).Info("oops",
-		"email", "bob@example.com",
-		"user_email", "carol@example.com",
-		"Authorization", "Bearer x",
-		"api_key", "k-123",
-		"X-Api-Key", "k-456",
-		"db_password", "hunter2",
-		slog.Group("req", "session_token", "t-789"),
-	)
-	for _, secret := range []string{"bob@", "carol@", "Bearer", "k-123", "k-456", "hunter2", "t-789"} {
+	newLogger(&buf).Info("oops", "user_email", "carol@example.com", slog.Group("req", "session_token", "t-789"))
+	for _, secret := range []string{"carol@", "t-789"} {
 		if strings.Contains(buf.String(), secret) {
 			t.Errorf("sensitive value %q logged: %s", secret, buf.String())
 		}

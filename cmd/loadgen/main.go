@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,14 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
-
-type kind int
-
-const (
-	normal kind = iota
-	slow
-	failing
 )
 
 func main() {
@@ -35,28 +28,28 @@ func main() {
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		fatalf("invalid -url %q", *target)
 	}
-	if *workers < 1 || *n < 0 || *errRate < 0 || *slowRate < 0 || *errRate+*slowRate > 1 {
-		fatalf("need -c >= 1, -n >= 0 and 0 <= -errors + -slow <= 1")
+	if err := checkFlags(*n, *workers, *errRate, *slowRate); err != nil {
+		fatalf("%v", err)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	jobs := make(chan kind)
+	jobs := make(chan string)
 	var (
-		mu       sync.Mutex
-		byStatus = map[int]int{}
-		sent     = map[kind]int{}
-		failures int
-		wg       sync.WaitGroup
+		mu         sync.Mutex
+		byStatus   = map[int]int{}
+		sent       = map[string]int{}
+		transports int
+		wg         sync.WaitGroup
 	)
 	for range *workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for k := range jobs {
-				status, err := send(client, base.String(), k)
+			for kind := range jobs {
+				status, err := send(client, base.String(), kind)
 				mu.Lock()
 				if err != nil {
-					failures++
+					transports++
 				} else {
 					byStatus[status]++
 				}
@@ -66,51 +59,71 @@ func main() {
 	}
 	start := time.Now()
 	for range *n {
-		k := normal
+		kind := "normal"
 		switch p := rand.Float64(); {
 		case p < *errRate:
-			k = failing
+			kind = "failing"
 		case p < *errRate+*slowRate:
-			k = slow
+			kind = "slow"
 		}
-		sent[k]++
-		jobs <- k
+		sent[kind]++
+		jobs <- kind
 	}
 	close(jobs)
 	wg.Wait()
 
 	fmt.Printf("loadgen: %d requests in %s, by status: %v, transport errors: %d\n",
-		*n, time.Since(start).Round(time.Millisecond), byStatus, failures)
-	fmt.Printf("sent: normal=%d slow=%d failing=%d\n", sent[normal], sent[slow], sent[failing])
-
-	if failures > 0 {
-		os.Exit(1)
-	}
-	// The API should fail about as often as asked: otherwise DEMO_FAULTS is
-	// off, or something else is broken.
-	var errors5xx int
-	for code, c := range byStatus {
-		if code >= 500 {
-			errors5xx += c
-		}
-	}
-	if *n > 0 {
-		share := float64(errors5xx) / float64(*n)
-		if (*errRate > 0 && errors5xx == 0) || share > 2**errRate+0.01 {
-			fatalf("5xx share %.1f%% is far from -errors %.1f%%", share*100, *errRate*100)
-		}
+		*n, time.Since(start).Round(time.Millisecond), byStatus, transports)
+	fmt.Printf("sent: normal=%d slow=%d failing=%d\n", sent["normal"], sent["slow"], sent["failing"])
+	if err := verdict(byStatus, sent, transports); err != nil {
+		fatalf("%v", err)
 	}
 }
 
-func send(c *http.Client, base string, k kind) (int, error) {
+// checkFlags is written in the positive (x >= 0 && x <= 1) so NaN fails it.
+func checkFlags(n, workers int, errRate, slowRate float64) error {
+	ok := func(x float64) bool { return x >= 0 && x <= 1 }
+	if n < 0 || workers < 1 || !ok(errRate) || !ok(slowRate) || !ok(errRate+slowRate) {
+		return errors.New("need -n >= 0, -c >= 1 and 0 <= -errors, -slow, their sum <= 1")
+	}
+	return nil
+}
+
+// verdict checks the API answered as asked: one 5xx per failing request sent
+// (with DEMO_FAULTS off, ?fail=1 is ignored and there would be none), and
+// few others. It compares with what was actually sent, not with the rate.
+func verdict(byStatus map[int]int, sent map[string]int, transportErrs int) error {
+	if transportErrs > 0 {
+		return fmt.Errorf("%d transport errors", transportErrs)
+	}
+	var errs5xx int
+	for code, c := range byStatus {
+		if code >= 500 {
+			errs5xx += c
+		}
+	}
+	failing := sent["failing"]
+	if failing == 0 {
+		return nil
+	}
+	if errs5xx < failing {
+		return fmt.Errorf("%d 5xx for %d failing requests sent: is DEMO_FAULTS=1 set?", errs5xx, failing)
+	}
+	if extra := errs5xx - failing; extra > max(2, failing/10) {
+		return fmt.Errorf("%d unexpected 5xx beyond the %d failing requests sent", extra, failing)
+	}
+	return nil
+}
+
+func send(c *http.Client, base, kind string) (int, error) {
 	var (
 		req *http.Request
 		err error
 	)
 	switch {
-	case k == failing:
+	case kind == "failing":
 		req, err = http.NewRequest("GET", base+"/invoices/1?fail=1", nil)
-	case k == slow:
+	case kind == "slow":
 		req, err = http.NewRequest("GET", base+"/invoices/1?delay=700ms", nil)
 	case rand.Float64() < 0.83:
 		// IDs 1..20: most do not exist (404), which is normal traffic too.

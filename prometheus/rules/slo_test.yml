@@ -48,17 +48,20 @@ tests:
             exp_annotations:
               summary: "Invoice API burns its 30-day error budget 14.4x too fast (2% in 1h)"
 
-  # 2% for an hour, then back to 0.5% for 10 minutes: the 1h window is still
-  # high, the 5m window shows it is over, so no page.
-  - name: finished spike does not page
+  # 2% for an hour, then back to 0.5% for 7 minutes: the 1h window (1.8%) and
+  # even a 30m one (1.6%) are still high, the 5m window shows it is over, so
+  # no page. The steady 404s are client errors: they must not count.
+  - name: finished spike does not page, 404s are not errors
     interval: 1m
     input_series:
       - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="200"}'
-        values: '0+588x60 35877+597x9'
+        values: '0+588x60 35877+597x6'
       - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
-        values: '0+12x60 723+3x9'
+        values: '0+12x60 723+3x6'
+      - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="404"}'
+        values: '0+20x67'
     alert_rule_test:
-      - eval_time: 70m
+      - eval_time: 67m
         alertname: InvoiceAPIErrorBudgetFastBurn
         exp_alerts: []
 
@@ -85,6 +88,15 @@ tests:
       - series: 'http_requests_total{job="invoice-api",route="/invoices/{id}",code="500"}'
         values: '0+8x60'
     alert_rule_test:
+      - eval_time: 10m # condition true, still pending
+        alertname: InvoiceAPIErrorBudgetSlowBurn
+        exp_alerts: []
+      - eval_time: 17m # just past the 15m "for"
+        alertname: InvoiceAPIErrorBudgetSlowBurn
+        exp_alerts:
+          - exp_labels: { severity: ticket, job: invoice-api }
+            exp_annotations:
+              summary: "Invoice API burns its 30-day error budget 6x too fast (5% in 6h)"
       - eval_time: 30m
         alertname: InvoiceAPIErrorBudgetSlowBurn
         exp_alerts:

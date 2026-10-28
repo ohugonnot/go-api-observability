@@ -1,7 +1,9 @@
 package main
 
 import (
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -25,8 +27,11 @@ func TestStatusCodes(t *testing.T) {
 		{"body too large", "POST", "/invoices", `{"customer":"` + strings.Repeat("a", 1<<20) + `"}`, http.StatusRequestEntityTooLarge},
 		{"zero amount", "POST", "/invoices", `{"customer":"Bob","amount_cents":0,"currency":"EUR"}`, http.StatusUnprocessableEntity},
 		{"blank customer", "POST", "/invoices", `{"customer":"  ","amount_cents":1,"currency":"EUR"}`, http.StatusUnprocessableEntity},
-		{"customer too long", "POST", "/invoices", `{"customer":"` + strings.Repeat("a", 257) + `","amount_cents":1,"currency":"EUR"}`, http.StatusUnprocessableEntity},
-		{"email too long", "POST", "/invoices", `{"customer":"Bob","email":"` + strings.Repeat("a", 257) + `","amount_cents":1,"currency":"EUR"}`, http.StatusUnprocessableEntity},
+		{"customer 256 bytes", "POST", "/invoices", `{"customer":"` + strings.Repeat("é", 128) + `","amount_cents":1,"currency":"EUR"}`, http.StatusCreated},
+		{"customer 257 bytes", "POST", "/invoices", `{"customer":"` + strings.Repeat("a", 257) + `","amount_cents":1,"currency":"EUR"}`, http.StatusUnprocessableEntity},
+		{"email 256 bytes", "POST", "/invoices", `{"customer":"Bob","email":"` + strings.Repeat("a", 256) + `","amount_cents":1,"currency":"EUR"}`, http.StatusCreated},
+		{"email 257 bytes", "POST", "/invoices", `{"customer":"Bob","email":"` + strings.Repeat("a", 257) + `","amount_cents":1,"currency":"EUR"}`, http.StatusUnprocessableEntity},
+		{"too large after the JSON", "POST", "/invoices", valid + strings.Repeat(" ", 1<<20), http.StatusRequestEntityTooLarge},
 		{"lowercase currency", "POST", "/invoices", `{"customer":"Bob","amount_cents":1,"currency":"eur"}`, http.StatusUnprocessableEntity},
 		{"non ascii currency", "POST", "/invoices", `{"customer":"Bob","amount_cents":1,"currency":"€"}`, http.StatusUnprocessableEntity},
 		{"method not allowed", "DELETE", "/invoices/1", "", http.StatusMethodNotAllowed},
@@ -68,9 +73,63 @@ func TestConfigDefaults(t *testing.T) {
 
 func TestServerTimeouts(t *testing.T) {
 	srv := newServer(":0", http.NotFoundHandler())
-	if srv.ReadHeaderTimeout == 0 || srv.ReadTimeout == 0 || srv.WriteTimeout == 0 ||
-		srv.IdleTimeout == 0 || srv.MaxHeaderBytes != 16<<10 {
+	if srv.ReadHeaderTimeout <= 0 || srv.IdleTimeout <= 0 || srv.MaxHeaderBytes != 16<<10 {
 		t.Errorf("missing timeouts or header limit: %+v", srv)
+	}
+	if srv.ReadTimeout < srv.ReadHeaderTimeout {
+		t.Errorf("ReadTimeout %s < ReadHeaderTimeout %s", srv.ReadTimeout, srv.ReadHeaderTimeout)
+	}
+	if srv.WriteTimeout <= maxDemoDelay || srv.WriteTimeout <= srv.ReadTimeout {
+		t.Errorf("WriteTimeout %s must exceed the %s demo delay and ReadTimeout %s",
+			srv.WriteTimeout, maxDemoDelay, srv.ReadTimeout)
+	}
+}
+
+func TestHealthcheck(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ok.Close()
+	_, port, _ := net.SplitHostPort(ok.Listener.Addr().String())
+	if err := healthcheck(":" + port); err != nil {
+		t.Errorf("healthy server: %v", err)
+	}
+	ok.Close()
+	if err := healthcheck(":" + port); err == nil {
+		t.Error("stopped server reported healthy")
+	}
+
+	sick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer sick.Close()
+	_, port, _ = net.SplitHostPort(sick.Listener.Addr().String())
+	if err := healthcheck(":" + port); err == nil {
+		t.Error("a 503 /healthz reported healthy")
+	}
+}
+
+// 18 digits reach the store (and its span), 19 are rejected before it.
+func TestIDLengthBoundary(t *testing.T) {
+	app := newTestApp(t)
+	storeCalls := func() int {
+		n := 0
+		for _, s := range app.spans.Ended() {
+			if s.Name() == "store.Get" {
+				n++
+			}
+		}
+		return n
+	}
+	app.do("GET", "/invoices/"+strings.Repeat("9", 18), "")
+	if storeCalls() != 1 {
+		t.Fatalf("18-digit id: store.Get calls = %d, want 1", storeCalls())
+	}
+	app.do("GET", "/invoices/"+strings.Repeat("9", 19), "")
+	if storeCalls() != 1 {
+		t.Errorf("19-digit id reached store.Get")
 	}
 }
 

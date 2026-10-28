@@ -19,11 +19,13 @@ lint:
 vuln:
 	go run $(GOVULNCHECK) ./...
 
-up:
+up: ## start the stack (needs .env, see .env.example)
 	docker compose up -d --build --wait
 
-down:
-	docker compose --profile tools down -v
+# down needs no real password, but compose interpolates the whole file:
+# without make, run GRAFANA_ADMIN_PASSWORD=unused docker compose --profile tools down -v
+down: ## stop the stack and delete its volumes (works without .env)
+	GRAFANA_ADMIN_PASSWORD=$${GRAFANA_ADMIN_PASSWORD:-unused} docker compose --profile tools down -v
 
 demo: ## send mixed traffic to the running stack (no Go needed)
 	docker compose --profile tools run --rm --build loadgen

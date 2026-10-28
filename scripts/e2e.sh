@@ -18,13 +18,21 @@ docker compose version >/dev/null 2>&1 || fail "docker compose v2 is required (d
 docker info >/dev/null 2>&1 || fail "cannot reach the Docker daemon (is it running, are you in the docker group?)"
 pass "docker, docker compose, curl, jq"
 
-APP=http://127.0.0.1:8080
-PROM=http://127.0.0.1:9090
-JAEGER=http://127.0.0.1:16686
-GRAFANA=http://127.0.0.1:3000
 REQUESTS=${REQUESTS:-1000}
-# A dedicated project: never touches the dev stack (`make up`) or its volumes.
+# The 80% and 70-90% thresholds below are only statistically safe from here.
+((REQUESTS >= 500)) || fail "REQUESTS=$REQUESTS: use at least 500 (the sampling checks are statistical)"
+
+# Its own project AND its own host ports: a dev stack started with `make up`
+# (default ports, project "go-api-observability") keeps running untouched.
 export COMPOSE_PROJECT_NAME=invoice-api-e2e
+export APP_PORT=${E2E_APP_PORT:-18080}
+export PROMETHEUS_PORT=${E2E_PROMETHEUS_PORT:-19090}
+export JAEGER_PORT=${E2E_JAEGER_PORT:-26686}
+export GRAFANA_PORT=${E2E_GRAFANA_PORT:-13000}
+APP=http://127.0.0.1:$APP_PORT
+PROM=http://127.0.0.1:$PROMETHEUS_PORT
+JAEGER=http://127.0.0.1:$JAEGER_PORT
+GRAFANA=http://127.0.0.1:$GRAFANA_PORT
 export DEMO_FAULTS=1
 # A throwaway password if none is set: no .env file is needed (or written).
 if [[ -z "${GRAFANA_ADMIN_PASSWORD:-}" && -f .env ]]; then
@@ -162,6 +170,6 @@ pass "RED dashboard provisioned"
 step "the public port does not serve /metrics"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$APP/metrics")
 [[ "$code" == 404 ]] || fail "GET $APP/metrics returned $code, want 404"
-pass "GET /metrics on :8080 -> 404"
+pass "GET /metrics on the public port -> 404"
 
 step "all checks passed"

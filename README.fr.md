@@ -65,14 +65,39 @@ make rules        # promtool check rules / test rules / check config (Docker)
 ### La pile complète
 
 ```sh
-cp .env.example .env    # puis renseigner GRAFANA_ADMIN_PASSWORD, par exemple openssl rand -base64 18
-make up                 # docker compose up -d --build --wait
+cp .env.example .env    # puis renseigner GRAFANA_ADMIN_PASSWORD (voir plus bas)
+make up                 # démarre la pile
 make demo               # conteneur loadgen : 1000 requêtes, 5 % d'erreurs, 5 % de lentes
-make down               # docker compose down -v
-make e2e                # son propre projet compose : up, démo, vérifications, down -v
+make down               # l'arrête et supprime ses volumes (marche sans .env)
+make e2e                # son propre projet et ses propres ports : up, démo, vérifications, down -v
 ```
 
-Avec un mot de passe vide, `docker compose` refuse de démarrer : c'est voulu.
+Un mot de passe : `openssl rand -base64 18`, ou sans openssl
+`head -c 18 /dev/urandom | base64`. Avec un mot de passe vide,
+`docker compose` refuse de démarrer : c'est voulu.
+
+Sans `make` :
+
+```sh
+docker compose up -d --build --wait
+docker compose --profile tools run --rm --build loadgen              # = make demo
+docker compose --profile tools run --rm loadgen -n 3000 -errors 0.1  # autres mélanges
+GRAFANA_ADMIN_PASSWORD=unused docker compose --profile tools down -v # = make down
+./scripts/e2e.sh                                                     # = make e2e
+```
+
+Ports de l'hôte, tous liés à 127.0.0.1 :
+
+| Service    | Pile de dev (`make up`), variable | `make e2e` par défaut, surcharge |
+|------------|-----------------------------------|----------------------------------|
+| API        | 8080, `APP_PORT`                  | 18080, `E2E_APP_PORT`            |
+| Grafana    | 3000, `GRAFANA_PORT`              | 13000, `E2E_GRAFANA_PORT`        |
+| Jaeger UI  | 16686, `JAEGER_PORT`              | 26686, `E2E_JAEGER_PORT`         |
+| Prometheus | 9090, `PROMETHEUS_PORT`           | 19090, `E2E_PROMETHEUS_PORT`     |
+
+Le port de métriques de l'app (9091) et le Collector ne sont jamais publiés. Le
+test e2e a son propre projet compose et ses propres ports : il peut tourner
+pendant qu'une pile de dev est lancée.
 
 | URL                         | Quoi                                        |
 |-----------------------------|---------------------------------------------|
@@ -81,15 +106,27 @@ Avec un mot de passe vide, `docker compose` refuse de démarrer : c'est voulu.
 | http://127.0.0.1:16686      | interface Jaeger                            |
 | http://127.0.0.1:9090       | Prometheus (alertes sous /alerts)           |
 
+```
+app ──OTLP/HTTP──> otel-collector (tail_sampling) ──OTLP/gRPC──> jaeger
+ │ :9091/metrics            │ :8888 métriques internes
+ └──────────── prometheus (stockage des exemplars, règles SLO) <───┘
+                         grafana : datasources Prometheus + Jaeger, exemplar -> trace
+```
+
 ## Le parcours en 2 minutes
 
-1. `make up`, puis `make demo`.
+1. `make up`, puis `make demo`, puis attendre environ 15 secondes (le
+   Collector décide au bout de 5 s, Prometheus scrape toutes les 5 s).
 2. Ouvrir Grafana (http://127.0.0.1:3000), tableau **Invoice API - RED**.
 3. Dans le panneau **Duration**, les losanges sont des exemplars : survoler un
    losange, cliquer sur le lien `trace_id`. La trace s'ouvre dans Jaeger : span
    serveur, enfant `store.Get`, `demo.delay` pour une requête lente.
 4. Copier ce `trace_id` et retrouver les lignes de log correspondantes :
    `docker compose logs app | grep <trace_id>`.
+
+Peu de losanges ? Prometheus garde environ un exemplar par bucket
+d'histogramme et par scrape, et seules les erreurs et les requêtes lentes en
+portent un. Relancez `make demo` deux ou trois fois.
 
 ## Ce que montre chaque brique
 
@@ -104,8 +141,13 @@ ce même pointeur (pas de `r.WithContext`) pour le relire ensuite. Copier la
 requête casse d'un coup les labels, les noms de spans et les exemplars : six
 tests échouent.
 
-**Panics.** `instrument` récupère un handler qui panique, répond 500, le logge
-et le compte en `code="500"` : un crash ne peut pas échapper au taux d'erreur.
+**Panics.** `instrument` récupère un handler qui panique, le logge (type et
+pile) et le compte en `code="500"` : un crash ne peut pas échapper au taux
+d'erreur. Si rien n'a encore été écrit, le client reçoit une 500 ; si une partie
+de la réponse est déjà partie, la connexion est coupée (`http.ErrAbortHandler`)
+pour que le client voie un échec plutôt qu'une 200 tronquée. Un handler qui
+panique lui-même avec `http.ErrAbortHandler` abandonne volontairement : la
+panique est relancée, sans être comptée.
 
 **Port de métriques séparé.** `/metrics` écoute par défaut sur `127.0.0.1:9091`
 (`:9091` dans le compose, où ce port n'est pas publié). Ce n'est pas l'API, cela
@@ -121,9 +163,12 @@ choisit**, il n'est donc ni fiable ni forcément unique. Les logs d'accès des
 **Données personnelles.** La défense, c'est de ne pas les logger :
 `Invoice.LogValue` ne logge que l'id, le montant et la devise, le log d'un corps
 invalide ne recopie pas le corps, les identifiants invalides sont rejetés avant
-d'atteindre logs et spans. Un filet `ReplaceAttr` masque tout attribut dont la
-clé *contient* `email`, `passw`, `token`, `secret`, `cookie`, `authorization` ou
-`api_key`/`apikey`/`api-key`, quelle que soit la casse. Ses limites : il ne voit
+d'atteindre logs et spans. Un filet `ReplaceAttr` masque un attribut dont la clé
+(quelle que soit la casse) vaut, ou se termine par `_`, `-` ou `.` suivi de,
+l'un des mots `email`, `password`, `passwd`, `token`, `secret`, `cookie`,
+`set-cookie`, `authorization`, `api_key`, `apikey`, `api-key` : `user_email`,
+`X-Api-Key`, `db.password` sont masqués, `token_count` ou `email_verified` non.
+Ses limites : il ne voit
 que les clés d'attributs, donc un secret dans une map, dans une struct sans
 `LogValue` ou dans un message d'erreur passe quand même.
 
@@ -159,11 +204,12 @@ Grafana relie `trace_id` à la datasource Jaeger.
 
 **Alertes sur le budget d'erreur.** `prometheus/rules/slo.yml` : SLO de 99,9 %
 sur 30 jours, burn rate multi-fenêtres. Page à 14,4× (2 % du budget en 1 h,
-vérifié sur 1 h et 5 min), ticket à 6× (5 % en 6 h, sur 6 h et 30 min).
-`slo_test.yml` contient sept cas `promtool test rules` : brûlage soutenu
-(pending, puis firing), incident récent après une période calme, pic terminé,
-erreurs très récentes seules, brûlage lent, brûlage lent terminé, erreurs dans
-le budget.
+vérifié sur 1 h et 5 min), ticket à 6× (5 % en 6 h, sur 6 h et 30 min). Seules
+les 5xx comptent : une 404 est une erreur du client. `slo_test.yml` contient
+sept cas `promtool test rules` : brûlage soutenu (pending, puis firing),
+incident récent après une période calme, pic terminé avec des 404 continues,
+erreurs très récentes seules, brûlage lent (pending, puis firing), brûlage lent
+terminé, erreurs dans le budget.
 
 ### Les logs dans Loki (non inclus)
 
@@ -201,8 +247,10 @@ de Docker ou à un plugin de logging driver, donc plus de privilèges que le res
   `{"message":"request failed: 404 Not Found","status":"ERROR"}`. Passer à Tempo
   est la vraie solution à terme.
 - **Durcissement, là où beaucoup de tutoriels font autrement :** aucun conteneur
-  en root, `cap_drop: ALL`, `no-new-privileges` et systèmes de fichiers en
-  lecture seule, mot de passe Grafana dans `.env` (jamais `admin/admin` dans le
+  en root, `cap_drop: ALL`, `no-new-privileges`, systèmes de fichiers en
+  lecture seule, limites de mémoire et de processus, healthchecks (l'app se
+  sonde elle-même avec `-healthcheck` : son image distroless n'a pas de shell),
+  mot de passe Grafana dans `.env` (jamais `admin/admin` dans le
   compose), interfaces d'administration sur `127.0.0.1`, Prometheus sans
   `--web.enable-lifecycle`, images Go distroless `nonroot`.
 
@@ -224,9 +272,10 @@ Lancé par l'auteur le 28/10/2026 (WSL2, Docker 29.1.3, Compose v2.40.3).
 | tests unitaires, détecteur de courses | `go test -race ./...` dans `golang:1.26.10-bookworm` : vert |
 | vulnérabilités connues | `govulncheck ./...` (v1.9.0) : aucune (x/net v0.59.0 avait GO-2026-6617, corrigée par la v0.62.0) |
 | règles d'alerte | `promtool check rules`, `promtool test rules` (7 cas), `promtool check config`, dans `prom/prometheus:v3.15.1` |
+| verdict du générateur de charge | `go test ./cmd/loadgen` : petit n, aucune requête en échec, 5xx manquants ou en trop, flags NaN |
 | config du Collector | `otelcol-contrib validate` dans l'image 0.164.0 |
-| pile complète | `scripts/e2e.sh` (la cible `make e2e`) vert deux fois de suite depuis un clone neuf, avec un PATH sans Go : 1000 requêtes comptées, labels de route limités aux motifs, au moins 80 % des 5xx et des requêtes lentes retrouvées dans Jaeger, 70 à 90 % des traces abandonnées (observé : 82-83 %), chaque exemplar retrouvé dans Jaeger et dans les logs de l'app, règles d'alerte chargées, datasources Grafana en bonne santé, `/metrics` en 404 sur le port public |
-| les tests attrapent les régressions | 26 mutations Go et 12 mutations de règles, chacune a fait rougir un test (`mutate.py`) : par exemple `r.URL.Path` en label -> `TestRequestCounterUsesRoutePattern`, pas de `recover` -> `TestPanicIsCountedAs500`, exemplar sur toutes les requêtes -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> le cas pending/firing de `slo_test.yml`. Retirer la politique `errors` du Collector fait échouer l'e2e (« error traces in Jaeger: 4, want >= 80% of 45 ») |
+| pile complète | `scripts/e2e.sh` (la cible `make e2e`) vert deux fois de suite depuis un clone neuf, avec un PATH sans Go, pendant qu'une pile de dev (`docker compose up -d`, ports par défaut) tournait depuis un autre clone : 1000 requêtes comptées, labels de route limités aux motifs, au moins 80 % des 5xx et des requêtes lentes retrouvées dans Jaeger, 70 à 90 % des traces abandonnées (observé : 81-83 %), chaque exemplar retrouvé dans Jaeger et dans les logs de l'app, règles d'alerte chargées, datasources Grafana en bonne santé, `/metrics` en 404 sur le port public |
+| les tests attrapent les régressions | 42 mutations Go et 14 mutations de règles, chacune a fait rougir un test (`mutate.py`) : par exemple `r.URL.Path` en label -> `TestRequestCounterUsesRoutePattern`, pas de `recover` -> `TestPanicIsCountedAs500`, pas d'abandon après une écriture partielle -> `TestPanicAfterWriteAbortsConnection`, `validID` jusqu'à 40 chiffres -> `TestIDLengthBoundary`, exemplar sur toutes les requêtes -> `TestExemplarsOnlyForKeptTraces`, `for: 2m` -> `40m` -> le cas pending/firing de `slo_test.yml`. Retirer la politique `errors` du Collector fait échouer l'e2e (« error traces in Jaeger: 4, want >= 80% of 45 ») |
 | incompatibilité Jaeger 2.22 | reproduite, voir Choix |
 
 Non vérifié : la tenue en charge réelle ou avec plusieurs réplicas du Collector,

@@ -139,3 +139,66 @@ func TestSlowRequestGetsExemplar(t *testing.T) {
 		t.Errorf("slow request exemplars = %v, want 1", ids)
 	}
 }
+
+// serveRecovering calls h and returns what it panicked with, if anything.
+func serveRecovering(h http.Handler, rec *httptest.ResponseRecorder, req *http.Request) (p any) {
+	defer func() { p = recover() }()
+	h.ServeHTTP(rec, req)
+	return nil
+}
+
+// http.ErrAbortHandler is net/http's own "drop this connection" signal: it is
+// re-panicked untouched, neither counted nor logged as a 500.
+func TestAbortHandlerIsRepanickedUncounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	var logs strings.Builder
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /abort", func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) })
+	h := instrument(mux, newHTTPMetrics(reg), newLogger(&logs))
+
+	p := serveRecovering(h, httptest.NewRecorder(), httptest.NewRequest("GET", "/abort", nil))
+	if p != http.ErrAbortHandler {
+		t.Errorf("recovered %v, want http.ErrAbortHandler re-panicked", p)
+	}
+	if n := testutil.CollectAndCount(reg, "http_requests_total"); n != 0 {
+		t.Errorf("abort counted in %d series, want 0", n)
+	}
+	if strings.Contains(logs.String(), "panic recovered") {
+		t.Errorf("abort logged as a panic: %s", logs.String())
+	}
+}
+
+// Once bytes are out, a 500 cannot be sent: the request is counted as a 500,
+// the connection is aborted, and no second status line or error text is written.
+func TestPanicAfterWriteAbortsConnection(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	var logs strings.Builder
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /half", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic("boom")
+	})
+	h := instrument(mux, newHTTPMetrics(reg), newLogger(&logs))
+
+	rec := httptest.NewRecorder()
+	p := serveRecovering(h, rec, httptest.NewRequest("GET", "/half", nil))
+	if p != http.ErrAbortHandler {
+		t.Errorf("recovered %v, want http.ErrAbortHandler to abort the connection", p)
+	}
+	if rec.Code != http.StatusOK || rec.Body.String() != "partial" {
+		t.Errorf("response = %d %q, want the untouched partial 200", rec.Code, rec.Body.String())
+	}
+	want := `
+# HELP http_requests_total HTTP requests by method, route pattern and status code.
+# TYPE http_requests_total counter
+http_requests_total{code="500",method="GET",route="/half"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "http_requests_total"); err != nil {
+		t.Error(err)
+	}
+	for _, s := range []string{`"panic_type":"string"`, `"stack":"goroutine`} {
+		if !strings.Contains(logs.String(), s) {
+			t.Errorf("panic log lacks %s: %s", s, logs.String())
+		}
+	}
+}

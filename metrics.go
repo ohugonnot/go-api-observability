@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -69,19 +70,27 @@ func instrument(next http.Handler, m *httpMetrics, log *slog.Logger) http.Handle
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			// A panicking handler is still a request: count it as a 500.
 			p := recover()
+			if p == nil {
+				record(r, rec.status, time.Since(start), m, log)
+				return
+			}
 			if p == http.ErrAbortHandler {
-				panic(p) // deliberate abort: let net/http handle it
+				// A deliberate abort, not a bug: re-panic so net/http drops the
+				// connection quietly. Not counted as a 500.
+				panic(p)
 			}
-			if p != nil {
-				log.ErrorContext(r.Context(), "panic recovered", "panic", fmt.Sprint(p))
-				if !rec.wrote {
-					http.Error(rec, "internal server error", http.StatusInternalServerError)
-				}
-				rec.status = http.StatusInternalServerError
-			}
+			// A panicking handler is still a request: count and log it as a 500.
+			rec.status = http.StatusInternalServerError
 			record(r, rec.status, time.Since(start), m, log)
+			log.ErrorContext(r.Context(), "panic recovered",
+				"panic_type", fmt.Sprintf("%T", p), "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+			if rec.wrote {
+				// Part of the response is already out: a 500 can no longer be
+				// sent, so abort the connection and let the client see a failure.
+				panic(http.ErrAbortHandler)
+			}
+			http.Error(rec, "internal server error", http.StatusInternalServerError)
 		}()
 		next.ServeHTTP(rec, r)
 	})

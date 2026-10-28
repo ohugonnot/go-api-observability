@@ -9,7 +9,10 @@
 # - Prometheus runs without --web.enable-lifecycle (often added to allow
 #   POST /-/reload and /-/quit, which nobody should reach without auth);
 # - the app's /metrics port (9091) is not published at all;
-# - read-only root filesystems, writes only to named volumes or tmpfs.
+# - read-only root filesystems, writes only to named volumes or tmpfs;
+# - memory and process limits on every service.
+#
+# Host ports can be moved: APP_PORT, PROMETHEUS_PORT, JAEGER_PORT, GRAFANA_PORT.
 
 x-hardening: &hardening
   cap_drop: [ALL]
@@ -34,11 +37,20 @@ services:
       # here would drop errors before tail sampling could keep them.
       TRACE_SAMPLE_RATIO: "1"
       DEMO_FAULTS: ${DEMO_FAULTS:-1} # enables ?delay= and ?fail=; set 0 outside the demo
+    mem_limit: 128m
+    pids_limit: 100
+    healthcheck: # distroless: no shell or curl, the binary probes itself
+      test: ["CMD", "/invoice-api", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
     depends_on:
       otel-collector:
-        condition: service_started # scratch image: no shell for a healthcheck
+        # The contrib Collector image has no shell either, and no
+        # self-probe like ours: no healthcheck, "started" is the best we get.
+        condition: service_started
 
   # Traffic generator: docker compose --profile tools run --rm loadgen
   loadgen:
@@ -50,14 +62,20 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    pids_limit: 50
     command: ["-url", "http://app:8080", "-n", "1000"]
-    depends_on: [app]
+    depends_on:
+      app:
+        condition: service_healthy
 
   otel-collector:
     <<: *hardening
     image: otel/opentelemetry-collector-contrib:0.164.0
     user: "10001:10001"
     read_only: true
+    mem_limit: 256m # memory_limiter works from this cgroup limit
+    pids_limit: 100
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
@@ -72,19 +90,23 @@ services:
     user: "10001"
     read_only: true
     tmpfs: [/tmp]
+    mem_limit: 512m
+    pids_limit: 100
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:13133/status"]
       interval: 5s
       timeout: 3s
       retries: 24
     ports:
-      - "127.0.0.1:16686:16686" # UI and query API
+      - "127.0.0.1:${JAEGER_PORT:-16686}:16686" # UI and query API
 
   prometheus:
     <<: *hardening
     image: prom/prometheus:v3.15.1
     user: "65534:65534" # nobody
     read_only: true
+    mem_limit: 512m
+    pids_limit: 100
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -98,7 +120,7 @@ services:
       timeout: 3s
       retries: 24
     ports:
-      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
     <<: *hardening
@@ -106,6 +128,8 @@ services:
     user: "472"
     read_only: true
     tmpfs: [/tmp]
+    mem_limit: 512m
+    pids_limit: 200
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?copy .env.example to .env and set GRAFANA_ADMIN_PASSWORD}
@@ -123,7 +147,7 @@ services:
       timeout: 3s
       retries: 24
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     depends_on:
       prometheus:
         condition: service_healthy

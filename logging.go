@@ -32,19 +32,23 @@ func (h traceHandler) WithGroup(name string) slog.Handler {
 	return traceHandler{h.Handler.WithGroup(name)}
 }
 
-// sensitiveKeyParts is a safety net: an attribute whose key contains one of
-// these (any case) is masked, e.g. "user_email" or "X-Api-Key".
+// sensitiveWords is a safety net: an attribute is masked when its key (any
+// case) is one of these words or ends with "_word", "-word" or ".word":
+// "user_email", "X-Api-Key", "db.password" are masked, "token_count" or
+// "email_verified" are not.
 // It only sees attribute keys: a secret inside a map, a struct without
 // LogValue, or an error message goes through. The real defence is not
 // logging such values, and LogValue on business types (see Invoice).
-var sensitiveKeyParts = []string{
-	"email", "passw", "token", "secret", "cookie", "authorization", "api_key", "apikey", "api-key",
+var sensitiveWords = []string{
+	"email", "password", "passwd", "token", "secret", "cookie", "set-cookie",
+	"authorization", "api_key", "apikey", "api-key",
 }
 
 func redact(_ []string, a slog.Attr) slog.Attr {
 	key := strings.ToLower(a.Key)
-	for _, part := range sensitiveKeyParts {
-		if strings.Contains(key, part) {
+	for _, word := range sensitiveWords {
+		if key == word || strings.HasSuffix(key, "_"+word) ||
+			strings.HasSuffix(key, "-"+word) || strings.HasSuffix(key, "."+word) {
 			return slog.String(a.Key, "[REDACTED]")
 		}
 	}

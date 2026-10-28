@@ -75,8 +75,11 @@ func (s *server) createInvoice(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
 	err := dec.Decode(&in)
-	if err == nil && dec.Decode(&struct{}{}) != io.EOF {
-		err = errors.New("data after the JSON object")
+	if err == nil {
+		// Only whitespace may follow the object; this read can also hit the size limit.
+		if extra := dec.Decode(&struct{}{}); extra != io.EOF {
+			err = errors.Join(errors.New("data after the JSON object"), extra)
+		}
 	}
 	if err != nil {
 		if errors.As(err, new(*http.MaxBytesError)) {
