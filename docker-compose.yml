@@ -128,7 +128,7 @@ services:
 
   grafana:
     <<: *hardening
-    image: grafana/grafana:13.2.5
+    image: grafana/grafana:13.3.0
     user: "472"
     read_only: true
     tmpfs: [/tmp]
