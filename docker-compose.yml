@@ -75,7 +75,7 @@ services:
 
   otel-collector:
     <<: *hardening
-    image: otel/opentelemetry-collector-contrib:0.164.0
+    image: otel/opentelemetry-collector-contrib:0.165.0
     user: "10001:10001"
     read_only: true
     mem_limit: 256m # memory_limiter works from this cgroup limit
