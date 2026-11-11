@@ -106,7 +106,7 @@ services:
 
   prometheus:
     <<: *hardening
-    image: prom/prometheus:v3.15.1
+    image: prom/prometheus:v3.16.0
     user: "65534:65534" # nobody
     read_only: true
     mem_limit: 512m
